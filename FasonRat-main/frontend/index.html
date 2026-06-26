@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Control Panel</title>
+    <link rel="icon" href="data:," />
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  </head>
+  <body>
+    <div id="root">
+      <div id="preloader" style="position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:#09090b;transition:opacity .3s ease">
+        <div style="display:flex;flex-direction:column;align-items:center;gap:16px">
+          <div style="display:flex;flex-direction:column;align-items:center;gap:4px">
+            <div style="width:80px;height:2px;border-radius:1px;background:#27272a;overflow:hidden">
+              <div style="width:40%;height:100%;border-radius:1px;background:#863bff;animation:preloader-slide 1.2s ease-in-out infinite"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <style>@keyframes preloader-slide{0%{transform:translateX(-100%)}50%{transform:translateX(150%)}100%{transform:translateX(-100%)}}</style>
+    </div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
