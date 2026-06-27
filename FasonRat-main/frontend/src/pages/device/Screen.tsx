@@ -23,6 +23,10 @@ import {
   Send,
   AlertTriangle,
   Radio,
+  Plug,
+  Loader2,
+  Unplug,
+  Wifi,
 } from 'lucide-react';
 
 function mapPointerToDevice(
@@ -65,9 +69,12 @@ function mapPointerToDevice(
   };
 }
 
+type ConnectionState = 'disconnected' | 'connecting' | 'connected';
+
 export default function ScreenPage() {
   const { clientId, online } = useOutletContext<DeviceOutletContext>();
 
+  const [connectionState, setConnectionState] = useState<ConnectionState>('disconnected');
   const [streaming, setStreaming] = useState(false);
   const [frameSrc, setFrameSrc] = useState<string | null>(null);
   const [screenWidth, setScreenWidth] = useState(0);
@@ -83,6 +90,7 @@ export default function ScreenPage() {
   const pointerStart = useRef<{ x: number; y: number; time: number } | null>(null);
   const frameCountRef = useRef(0);
   const fpsTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const connectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const { sendCommand, commandStatus } = useDeviceData<Record<string, never>>({
     clientId,
@@ -113,18 +121,30 @@ export default function ScreenPage() {
       if (payload.screenWidth) setScreenWidth(payload.screenWidth);
       if (payload.screenHeight) setScreenHeight(payload.screenHeight);
       setStreaming(true);
+      setConnectionState('connected');
       setScreenError(null);
+      // Clear connection timeout since we got frames
+      if (connectTimeoutRef.current) {
+        clearTimeout(connectTimeoutRef.current);
+        connectTimeoutRef.current = null;
+      }
     });
 
     const unsubStopped = onScreenStopped((payload) => {
       if (payload.id !== clientId) return;
       setStreaming(false);
       setFrameSrc(null);
+      setConnectionState('disconnected');
     });
 
     const unsubStatus = onScreenStatus((payload) => {
       if (payload.id !== clientId) return;
-      if (payload.streaming !== undefined) setStreaming(payload.streaming);
+      if (payload.streaming !== undefined) {
+        setStreaming(payload.streaming);
+        if (payload.streaming) {
+          setConnectionState('connected');
+        }
+      }
       if (payload.screenWidth) setScreenWidth(payload.screenWidth);
       if (payload.screenHeight) setScreenHeight(payload.screenHeight);
       if (payload.fps !== undefined) setTargetFps(payload.fps);
@@ -136,6 +156,7 @@ export default function ScreenPage() {
       if (payload.id !== clientId) return;
       setScreenError(payload.error);
       setStreaming(false);
+      setConnectionState('disconnected');
     });
 
     return () => {
@@ -143,6 +164,9 @@ export default function ScreenPage() {
       unsubStopped();
       unsubStatus();
       unsubError();
+      if (connectTimeoutRef.current) {
+        clearTimeout(connectTimeoutRef.current);
+      }
     };
   }, [clientId]);
 
@@ -159,20 +183,34 @@ export default function ScreenPage() {
     if (online) requestStatus();
   }, [online, requestStatus]);
 
-  const startStream = useCallback(async () => {
+  // Connect: start stream + request accessibility status
+  const handleConnect = useCallback(async () => {
     setScreenError(null);
+    setConnectionState('connecting');
     try {
+      // Start screen streaming
       await sendCommand(CMD.SCREEN, { action: 'start', fps: targetFps, quality });
+      // Also check accessibility for remote control
+      await sendCommand(CMD.SCREEN_CTRL, { action: 'status' });
+      // Set timeout - if no frame received in 15s, consider connection failed
+      connectTimeoutRef.current = setTimeout(() => {
+        if (!streaming) {
+          setConnectionState('disconnected');
+          setScreenError('Connection timed out. The device may need to approve screen capture permission.');
+        }
+      }, 15000);
     } catch {
-      // error handled by hook
+      setConnectionState('disconnected');
     }
-  }, [sendCommand, targetFps, quality]);
+  }, [sendCommand, targetFps, quality, streaming]);
 
-  const stopStream = useCallback(async () => {
+  // Disconnect: stop stream
+  const handleDisconnect = useCallback(async () => {
     try {
       await sendCommand(CMD.SCREEN, { action: 'stop' });
       setStreaming(false);
       setFrameSrc(null);
+      setConnectionState('disconnected');
     } catch {
       // ignore
     }
@@ -250,25 +288,44 @@ export default function ScreenPage() {
     ? `${screenWidth}×${screenHeight}`
     : '—';
 
+  const isConnected = connectionState === 'connected';
+  const isConnecting = connectionState === 'connecting';
+
   return (
     <div className="space-y-5">
       <DevicePageHeader
         title="Live Screen"
-        subtitle={streaming ? 'Streaming active' : 'Remote screen view & control'}
+        subtitle={
+          isConnected
+            ? 'Connected — Remote control active'
+            : isConnecting
+              ? 'Connecting to device...'
+              : 'Remote screen view & control'
+        }
         commandStatus={commandStatus}
-        badge={streaming ? { label: 'LIVE', variant: 'destructive', className: 'animate-pulse' } : undefined}
-        actions={[
-          {
-            label: streaming ? 'Stop' : 'Start',
-            icon: streaming ? Square : Play,
-            onClick: streaming ? stopStream : startStream,
-            disabled: !online || commandStatus === 'sending',
-            variant: streaming ? 'destructive' : 'default',
-          },
-        ]}
+        badge={
+          isConnected
+            ? { label: 'LIVE', variant: 'destructive', className: 'animate-pulse' }
+            : isConnecting
+              ? { label: 'CONNECTING', variant: 'secondary', className: 'animate-pulse' }
+              : undefined
+        }
+        actions={
+          isConnected
+            ? [
+                {
+                  label: 'Disconnect',
+                  icon: Unplug,
+                  onClick: handleDisconnect,
+                  disabled: commandStatus === 'sending',
+                  variant: 'destructive',
+                },
+              ]
+            : []
+        }
       />
 
-      {accessible === false && (
+      {accessible === false && isConnected && (
         <div className="flex items-start gap-3 rounded-xl border border-warning/30 bg-warning/5 p-4">
           <AlertTriangle className="h-5 w-5 text-warning shrink-0 mt-0.5" />
           <div className="space-y-1">
@@ -285,14 +342,18 @@ export default function ScreenPage() {
       {/* Status bar */}
       <div className="flex flex-wrap items-center gap-2">
         <StatusBadge
-          label={streaming ? 'Streaming' : 'Idle'}
-          status={streaming ? 'success' : 'neutral'}
+          label={isConnected ? 'Connected' : isConnecting ? 'Connecting...' : 'Disconnected'}
+          status={isConnected ? 'success' : isConnecting ? 'warning' : 'neutral'}
         />
-        <StatusBadge label={`${fps} FPS`} status="neutral" />
-        <StatusBadge label={resolutionLabel} status="neutral" />
-        {accessible !== null && (
+        {isConnected && (
+          <>
+            <StatusBadge label={`${fps} FPS`} status="neutral" />
+            <StatusBadge label={resolutionLabel} status="neutral" />
+          </>
+        )}
+        {accessible !== null && isConnected && (
           <StatusBadge
-            label={accessible ? 'Control Ready' : 'Control Disabled'}
+            label={accessible ? 'Remote Control Ready' : 'Remote Control Disabled'}
             status={accessible ? 'success' : 'warning'}
           />
         )}
@@ -302,7 +363,9 @@ export default function ScreenPage() {
       <div className="relative rounded-2xl overflow-hidden border border-border/60 bg-black/90 shadow-xl">
         <div
           ref={viewportRef}
-          className="relative aspect-[9/16] max-h-[60vh] mx-auto cursor-crosshair select-none touch-none"
+          className={`relative aspect-[9/16] max-h-[60vh] mx-auto select-none touch-none ${
+            isConnected ? 'cursor-crosshair' : ''
+          }`}
           onPointerDown={handlePointerDown}
           onPointerUp={handlePointerUp}
         >
@@ -314,15 +377,93 @@ export default function ScreenPage() {
               draggable={false}
             />
           ) : (
-            <div className="absolute inset-0 flex flex-col items-center justify-center text-muted-foreground gap-3">
-              <Monitor className="h-12 w-12 opacity-30" />
-              <p className="text-sm">
-                {online
-                  ? streaming
-                    ? 'Waiting for frames...'
-                    : 'Press Start to begin streaming'
-                  : 'Device is offline'}
-              </p>
+            <div className="absolute inset-0 flex flex-col items-center justify-center gap-6">
+              {!online ? (
+                /* Device offline */
+                <>
+                  <div className="rounded-full bg-muted/20 p-6">
+                    <Monitor className="h-16 w-16 text-muted-foreground/30" />
+                  </div>
+                  <div className="text-center space-y-2">
+                    <p className="text-sm text-muted-foreground font-medium">Device is offline</p>
+                    <p className="text-xs text-muted-foreground/50">
+                      The device must be online to connect
+                    </p>
+                  </div>
+                </>
+              ) : isConnecting ? (
+                /* Connecting state */
+                <>
+                  <div className="relative">
+                    <div className="absolute inset-0 rounded-full bg-primary/20 animate-ping" />
+                    <div className="relative rounded-full bg-gradient-to-br from-primary/30 to-primary/10 p-8 border border-primary/20">
+                      <Loader2 className="h-16 w-16 text-primary animate-spin" />
+                    </div>
+                  </div>
+                  <div className="text-center space-y-2">
+                    <p className="text-sm text-primary font-semibold">Connecting to device...</p>
+                    <p className="text-xs text-muted-foreground">
+                      Waiting for screen capture approval on the device
+                    </p>
+                  </div>
+                </>
+              ) : (
+                /* Disconnected — Show Connect button */
+                <>
+                  <button
+                    onClick={handleConnect}
+                    disabled={!online || commandStatus === 'sending'}
+                    className="group relative cursor-pointer disabled:cursor-not-allowed disabled:opacity-50 focus:outline-none"
+                  >
+                    {/* Animated rings */}
+                    <div className="absolute inset-[-16px] rounded-full border-2 border-primary/10 group-hover:border-primary/30 group-hover:scale-110 transition-all duration-500" />
+                    <div className="absolute inset-[-8px] rounded-full border border-primary/20 group-hover:border-primary/40 group-hover:scale-105 transition-all duration-300" />
+
+                    {/* Main button circle */}
+                    <div className="relative rounded-full bg-gradient-to-br from-primary to-primary/80 p-8 shadow-lg shadow-primary/25 group-hover:shadow-xl group-hover:shadow-primary/40 group-hover:scale-105 transition-all duration-300">
+                      <Plug className="h-16 w-16 text-primary-foreground drop-shadow-sm" />
+                    </div>
+                  </button>
+
+                  <div className="text-center space-y-2 mt-2">
+                    <p className="text-base text-foreground/90 font-semibold">
+                      Click to Connect
+                    </p>
+                    <p className="text-xs text-muted-foreground max-w-[280px]">
+                      Start live screen streaming and enable remote control
+                    </p>
+                  </div>
+
+                  {/* Quick settings before connecting */}
+                  <div className="flex items-center gap-4 mt-2 px-6 py-3 rounded-xl bg-white/5 border border-white/10">
+                    <div className="flex items-center gap-2">
+                      <span className="text-[10px] text-muted-foreground uppercase tracking-wider">FPS</span>
+                      <select
+                        value={targetFps}
+                        onChange={(e) => setTargetFps(Number(e.target.value))}
+                        className="bg-transparent text-xs text-foreground/80 border border-white/10 rounded px-2 py-1 focus:outline-none focus:border-primary/50"
+                      >
+                        {[1, 2, 3, 5, 7, 10].map((v) => (
+                          <option key={v} value={v} className="bg-background">{v}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="w-px h-5 bg-white/10" />
+                    <div className="flex items-center gap-2">
+                      <span className="text-[10px] text-muted-foreground uppercase tracking-wider">Quality</span>
+                      <select
+                        value={quality}
+                        onChange={(e) => setQuality(Number(e.target.value))}
+                        className="bg-transparent text-xs text-foreground/80 border border-white/10 rounded px-2 py-1 focus:outline-none focus:border-primary/50"
+                      >
+                        {[20, 30, 40, 50, 60, 80, 100].map((v) => (
+                          <option key={v} value={v} className="bg-background">{v}%</option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+                </>
+              )}
             </div>
           )}
 
@@ -334,84 +475,92 @@ export default function ScreenPage() {
           )}
         </div>
 
-        {/* Glassmorphism control bar */}
-        <div className="absolute bottom-0 inset-x-0 backdrop-blur-md bg-background/70 border-t border-border/40 p-3">
-          <div className="flex flex-wrap items-center justify-center gap-2">
-            <Button size="sm" variant="outline" className="h-8 gap-1.5" onClick={() => sendKey('back')} disabled={!online || !streaming}>
-              <ArrowLeft className="h-3.5 w-3.5" /> Back
-            </Button>
-            <Button size="sm" variant="outline" className="h-8 gap-1.5" onClick={() => sendKey('home')} disabled={!online || !streaming}>
-              <Home className="h-3.5 w-3.5" /> Home
-            </Button>
-            <Button size="sm" variant="outline" className="h-8 gap-1.5" onClick={() => sendKey('recents')} disabled={!online || !streaming}>
-              <LayoutGrid className="h-3.5 w-3.5" /> Recents
-            </Button>
+        {/* Glassmorphism control bar — only when connected */}
+        {isConnected && (
+          <div className="absolute bottom-0 inset-x-0 backdrop-blur-md bg-background/70 border-t border-border/40 p-3">
+            <div className="flex flex-wrap items-center justify-center gap-2">
+              <Button size="sm" variant="outline" className="h-8 gap-1.5" onClick={() => sendKey('back')} disabled={!online || !streaming}>
+                <ArrowLeft className="h-3.5 w-3.5" /> Back
+              </Button>
+              <Button size="sm" variant="outline" className="h-8 gap-1.5" onClick={() => sendKey('home')} disabled={!online || !streaming}>
+                <Home className="h-3.5 w-3.5" /> Home
+              </Button>
+              <Button size="sm" variant="outline" className="h-8 gap-1.5" onClick={() => sendKey('recents')} disabled={!online || !streaming}>
+                <LayoutGrid className="h-3.5 w-3.5" /> Recents
+              </Button>
+              <div className="w-px h-6 bg-border/40 mx-1 hidden sm:block" />
+              <Button size="sm" variant="destructive" className="h-8 gap-1.5" onClick={handleDisconnect} disabled={commandStatus === 'sending'}>
+                <Unplug className="h-3.5 w-3.5" /> Disconnect
+              </Button>
+            </div>
           </div>
-        </div>
+        )}
       </div>
 
-      {/* Settings & text input */}
-      <div className="grid gap-4 sm:grid-cols-2">
-        <div className="space-y-3 rounded-xl border border-border/60 p-4">
-          <p className="text-sm font-medium">Stream Settings</p>
-          <div className="space-y-2">
-            <div className="flex items-center justify-between gap-3">
-              <Label htmlFor="fps-slider" className="text-xs text-muted-foreground shrink-0">
-                Target FPS: {targetFps}
-              </Label>
-              <input
-                id="fps-slider"
-                type="range"
-                min={1}
-                max={10}
-                value={targetFps}
-                onChange={(e) => setTargetFps(Number(e.target.value))}
-                disabled={streaming}
-                className="w-full max-w-[180px] accent-primary"
-              />
+      {/* Settings & text input — only when connected */}
+      {isConnected && (
+        <div className="grid gap-4 sm:grid-cols-2">
+          <div className="space-y-3 rounded-xl border border-border/60 p-4">
+            <p className="text-sm font-medium">Stream Settings</p>
+            <div className="space-y-2">
+              <div className="flex items-center justify-between gap-3">
+                <Label htmlFor="fps-slider" className="text-xs text-muted-foreground shrink-0">
+                  Target FPS: {targetFps}
+                </Label>
+                <input
+                  id="fps-slider"
+                  type="range"
+                  min={1}
+                  max={10}
+                  value={targetFps}
+                  onChange={(e) => setTargetFps(Number(e.target.value))}
+                  disabled={streaming}
+                  className="w-full max-w-[180px] accent-primary"
+                />
+              </div>
+              <div className="flex items-center justify-between gap-3">
+                <Label htmlFor="quality-slider" className="text-xs text-muted-foreground shrink-0">
+                  JPEG Quality: {quality}%
+                </Label>
+                <input
+                  id="quality-slider"
+                  type="range"
+                  min={10}
+                  max={100}
+                  step={5}
+                  value={quality}
+                  onChange={(e) => setQuality(Number(e.target.value))}
+                  disabled={streaming}
+                  className="w-full max-w-[180px] accent-primary"
+                />
+              </div>
+              <p className="text-[10px] text-muted-foreground">
+                Adjust before starting. Lower values reduce bandwidth.
+              </p>
             </div>
-            <div className="flex items-center justify-between gap-3">
-              <Label htmlFor="quality-slider" className="text-xs text-muted-foreground shrink-0">
-                JPEG Quality: {quality}%
-              </Label>
-              <input
-                id="quality-slider"
-                type="range"
-                min={10}
-                max={100}
-                step={5}
-                value={quality}
-                onChange={(e) => setQuality(Number(e.target.value))}
-                disabled={streaming}
-                className="w-full max-w-[180px] accent-primary"
+          </div>
+
+          <div className="space-y-3 rounded-xl border border-border/60 p-4">
+            <p className="text-sm font-medium">Text Input</p>
+            <div className="flex gap-2">
+              <Input
+                value={textInput}
+                onChange={(e) => setTextInput(e.target.value)}
+                placeholder="Type text to send..."
+                disabled={!online || !streaming}
+                onKeyDown={(e) => e.key === 'Enter' && sendText()}
+                className="h-9"
               />
+              <Button size="sm" onClick={sendText} disabled={!online || !streaming || !textInput.trim()} className="h-9 gap-1.5 shrink-0">
+                <Send className="h-3.5 w-3.5" /> Send
+              </Button>
             </div>
             <p className="text-[10px] text-muted-foreground">
-              Adjust before starting. Lower values reduce bandwidth.
+              Click on a text field on the device first, then send text.
             </p>
           </div>
         </div>
-
-        <div className="space-y-3 rounded-xl border border-border/60 p-4">
-          <p className="text-sm font-medium">Text Input</p>
-          <div className="flex gap-2">
-            <Input
-              value={textInput}
-              onChange={(e) => setTextInput(e.target.value)}
-              placeholder="Type text to send..."
-              disabled={!online || !streaming}
-              onKeyDown={(e) => e.key === 'Enter' && sendText()}
-              className="h-9"
-            />
-            <Button size="sm" onClick={sendText} disabled={!online || !streaming || !textInput.trim()} className="h-9 gap-1.5 shrink-0">
-              <Send className="h-3.5 w-3.5" /> Send
-            </Button>
-          </div>
-          <p className="text-[10px] text-muted-foreground">
-            Click on a text field on the device first, then send text.
-          </p>
-        </div>
-      </div>
+      )}
     </div>
   );
 }

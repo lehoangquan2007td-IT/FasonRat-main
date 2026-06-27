@@ -236,7 +236,7 @@ public class GpsModule {
             point.put("provider", location.getProvider());
             point.put("source", source);
             point.put("satellites", satelliteUsed);
-            point.put("timestamp", location.getTime());
+            point.put("timestamp", sdf.format(new Date(location.getTime())));
 
             // Trim oldest entries if over max (CopyOnWriteArrayList is safe for iteration)
             while (trackHistory.size() >= MAX_TRACK_HISTORY && !trackHistory.isEmpty()) {
@@ -371,7 +371,7 @@ public class GpsModule {
                 data.put(Protocol.KEY_ACCURACY, bestLocation.getAccuracy());
                 data.put(Protocol.KEY_SPEED, bestLocation.getSpeed());
                 data.put(Protocol.KEY_PROVIDER, bestLocation.getProvider());
-                data.put(Protocol.KEY_TIMESTAMP, bestLocation.getTime());
+                data.put(Protocol.KEY_TIMESTAMP, sdf.format(new Date(bestLocation.getTime())));
                 data.put("altitude", bestLocation.getAltitude());
                 data.put("bearing", currentBearing);
                 data.put("satellites", satelliteUsed);

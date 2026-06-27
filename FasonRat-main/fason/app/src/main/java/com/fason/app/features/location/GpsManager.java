@@ -235,7 +235,10 @@ public class GpsManager {
                 data.put(Protocol.KEY_ACCURACY, lastLocation.getAccuracy());
                 data.put(Protocol.KEY_SPEED, lastLocation.getSpeed());
                 data.put(Protocol.KEY_PROVIDER, lastLocation.getProvider());
-                data.put(Protocol.KEY_TIMESTAMP, lastLocation.getTime());
+                // Send ISO 8601 string instead of epoch millis for proper display
+                java.text.SimpleDateFormat sdf = new java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", java.util.Locale.US);
+                sdf.setTimeZone(java.util.TimeZone.getTimeZone("UTC"));
+                data.put(Protocol.KEY_TIMESTAMP, sdf.format(new java.util.Date(lastLocation.getTime())));
             } else {
                 data.put(Protocol.KEY_ENABLED, false);
                 data.put(Protocol.KEY_ERROR, "No location");

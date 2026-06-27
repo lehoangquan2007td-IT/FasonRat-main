@@ -24,14 +24,34 @@ export default function GpsPage() {
     clientId,
     page: 'gps',
     extractData: (d) => ({
-      locations: extractList<GpsLocation>(d.list).map((loc) => ({
-        latitude: typeof loc.latitude === 'number' ? loc.latitude : 0,
-        longitude: typeof loc.longitude === 'number' ? loc.longitude : 0,
-        accuracy: typeof loc.accuracy === 'number' ? loc.accuracy : undefined,
-        speed: typeof loc.speed === 'number' ? loc.speed : undefined,
-        provider: typeof loc.provider === 'string' ? loc.provider : undefined,
-        time: loc.time || '',
-      })),
+      locations: extractList<GpsLocation>(d.list).map((loc) => {
+        // Normalize time: could be ISO string, epoch millis number, or numeric string
+        let timeStr = '';
+        const rawTime = (loc as Record<string, unknown>).time ?? (loc as Record<string, unknown>).timestamp;
+        if (rawTime) {
+          if (typeof rawTime === 'number') {
+            // epoch millis from old data
+            timeStr = new Date(rawTime).toLocaleString();
+          } else if (typeof rawTime === 'string') {
+            // Could be ISO string or numeric string (epoch ms stored as string)
+            const asNum = Number(rawTime);
+            if (!isNaN(asNum) && rawTime.length > 8) {
+              timeStr = new Date(asNum).toLocaleString();
+            } else {
+              const parsed = new Date(rawTime);
+              timeStr = isNaN(parsed.getTime()) ? rawTime : parsed.toLocaleString();
+            }
+          }
+        }
+        return {
+          latitude: typeof loc.latitude === 'number' ? loc.latitude : 0,
+          longitude: typeof loc.longitude === 'number' ? loc.longitude : 0,
+          accuracy: typeof loc.accuracy === 'number' ? loc.accuracy : undefined,
+          speed: typeof loc.speed === 'number' ? loc.speed : undefined,
+          provider: typeof loc.provider === 'string' ? loc.provider : undefined,
+          time: timeStr,
+        };
+      }),
       interval: typeof d.interval === 'number' ? d.interval : 0,
     }),
     dataType: 'gps',
