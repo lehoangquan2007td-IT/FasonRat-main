@@ -136,9 +136,9 @@ public class MainService extends Service {
         }
     }
 
-    // Android 14+ requires updating the foreground service type when new capabilities are needed
+    // Android 10+ requires updating the foreground service type when new capabilities are needed
     public void updateType(int type) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             int combined = currentType | type;
             if (combined != currentType) {
                 currentType = combined;
@@ -150,7 +150,7 @@ public class MainService extends Service {
     }
 
     public void releaseType(int type) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             int remaining = currentType & ~type;
             if (remaining != currentType && remaining != 0) {
                 currentType = remaining;

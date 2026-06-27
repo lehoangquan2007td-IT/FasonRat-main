@@ -91,7 +91,7 @@ public class NotificationRelayService extends NotificationListenerService {
             .build();
 
         try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 startForeground(NOTIF_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
             } else {
                 startForeground(NOTIF_ID, n);

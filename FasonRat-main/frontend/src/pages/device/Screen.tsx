@@ -192,12 +192,15 @@ export default function ScreenPage() {
       await sendCommand(CMD.SCREEN, { action: 'start', fps: targetFps, quality });
       // Also check accessibility for remote control
       await sendCommand(CMD.SCREEN_CTRL, { action: 'status' });
-      // Set timeout - if no frame received in 15s, consider connection failed
+      // Set timeout - if no frames received in 15s, consider connection failed
       connectTimeoutRef.current = setTimeout(() => {
-        if (!streaming) {
-          setConnectionState('disconnected');
-          setScreenError('Connection timed out. The device may need to approve screen capture permission.');
-        }
+        setConnectionState((current) => {
+          if (current === 'connecting') {
+            setScreenError('Connection timed out. The device may need to approve screen capture permission.');
+            return 'disconnected';
+          }
+          return current;
+        });
       }, 15000);
     } catch {
       setConnectionState('disconnected');

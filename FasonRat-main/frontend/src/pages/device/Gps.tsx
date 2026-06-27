@@ -9,8 +9,44 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
-import { MapPin, Play, Square, ExternalLink, Navigation, ChevronLeft, ChevronRight } from 'lucide-react';
+import { MapPin, Play, Square, ExternalLink, Navigation, ChevronLeft, ChevronRight, Loader2 } from 'lucide-react';
 import { clientsApi } from '@/services/api';
+
+function AddressDisplay({ lat, lon }: { lat: number; lon: number }) {
+  const [address, setAddress] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    let mounted = true;
+    if (!lat || !lon) return;
+    
+    setLoading(true);
+    fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lon}`)
+      .then(res => res.json())
+      .then(data => {
+        if (mounted && data.display_name) {
+          setAddress(data.display_name);
+        }
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (mounted) setLoading(false);
+      });
+
+    return () => { mounted = false; };
+  }, [lat, lon]);
+
+  if (loading) {
+    return <div className="text-xs text-muted-foreground flex items-center gap-1 mt-1"><Loader2 className="h-3 w-3 animate-spin" /> Fetching address...</div>;
+  }
+  if (!address) return null;
+
+  return (
+    <div className="text-sm text-muted-foreground mt-1 leading-snug">
+      {address}
+    </div>
+  );
+}
 
 export default function GpsPage() {
   const { client, clientId, online } = useOutletContext<DeviceOutletContext>();
@@ -168,6 +204,7 @@ export default function GpsPage() {
                     <p className="text-sm font-bold font-mono text-foreground">
                       {latest.latitude}, {latest.longitude}
                     </p>
+                    <AddressDisplay lat={latest.latitude} lon={latest.longitude} />
                     <div className="flex flex-wrap items-center gap-3 mt-1.5 text-xs text-muted-foreground">
                       <span className="flex items-center gap-1">
                         <Navigation className="h-3 w-3" /> 
