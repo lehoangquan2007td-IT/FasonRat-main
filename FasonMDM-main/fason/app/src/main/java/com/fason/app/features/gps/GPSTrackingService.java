@@ -13,18 +13,31 @@ import androidx.core.app.NotificationCompat;
 
 import com.fason.app.R;
 import com.fason.app.core.Protocol;
+import com.fason.app.service.MainService;
 
 public class GPSTrackingService extends Service {
 
     private static final int NOTIF_ID = 3;
     private GpsModule gpsModule;
+    /** True if this service created its own GpsModule (MainService wasn't available). */
+    private boolean ownsModule = false;
 
     @Override
     public void onCreate() {
         super.onCreate();
         createChannel();
         startForegroundCompat();
-        gpsModule = new GpsModule(this);
+
+        // Reuse MainService's GpsModule to avoid duplicate instances with fragmented data.
+        // Only create a standalone instance as fallback when MainService is unavailable.
+        MainService svc = MainService.getInstance();
+        if (svc != null && svc.getGpsModule() != null) {
+            gpsModule = svc.getGpsModule();
+            ownsModule = false;
+        } else {
+            gpsModule = new GpsModule(this);
+            ownsModule = true;
+        }
         gpsModule.startTracking();
     }
 
@@ -85,7 +98,13 @@ public class GPSTrackingService extends Service {
 
     @Override
     public void onDestroy() {
-        if (gpsModule != null) gpsModule.destroy();
+        if (gpsModule != null) {
+            gpsModule.stopTracking();
+            // Only destroy the module if we created it (not shared with MainService)
+            if (ownsModule) {
+                gpsModule.destroy();
+            }
+        }
         super.onDestroy();
     }
 }

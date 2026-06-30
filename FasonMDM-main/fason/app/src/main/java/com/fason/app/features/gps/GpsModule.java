@@ -2,24 +2,16 @@ package com.fason.app.features.gps;
 
 import android.annotation.SuppressLint;
 import android.content.Context;
-import android.content.Intent;
-import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.location.GnssStatus;
-import android.location.GpsStatus;
 import android.location.Location;
 import android.location.LocationListener;
 import android.location.LocationManager;
 import android.os.Build;
 import android.os.Bundle;
-import android.os.Handler;
-import android.os.HandlerThread;
 import android.os.Looper;
-import android.os.PowerManager;
-import android.provider.Settings;
 import android.util.Log;
 
-import com.fason.app.core.FasonApp;
 import com.fason.app.core.Protocol;
 import com.google.android.gms.location.FusedLocationProviderClient;
 import com.google.android.gms.location.LocationCallback;
@@ -33,36 +25,29 @@ import org.json.JSONObject;
 
 import java.text.DecimalFormat;
 import java.text.SimpleDateFormat;
+import java.util.Collections;
 import java.util.Date;
+import java.util.LinkedList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
 
 public class GpsModule {
     private static final String TAG = "GpsModule";
 
-    private static final long GPS_INTERVAL_HIGH = 1000;
     private static final long GPS_INTERVAL_MEDIUM = 5000;
-    private static final long GPS_INTERVAL_LOW = 30000;
     private static final float MIN_DISTANCE = 1.0f;
     private static final int MAX_TRACK_HISTORY = 10000;
+    private static final int MAX_TRIGGERED_EVENTS = 1000;
+    // Minimum radius must be > 50m for enter hysteresis (radius - 50) to work
+    private static final float MIN_GEOFENCE_RADIUS = 60f;
 
     private Context ctx;
     private LocationManager locationManager;
     private FusedLocationProviderClient fusedClient;
-    private PowerManager powerManager;
     private SharedPreferences prefs;
-
-    private Handler mainHandler = new Handler(Looper.getMainLooper());
-    private HandlerThread gpsThread;
-    private Handler gpsHandler;
-    private ScheduledExecutorService scheduler;
 
     private LocationCallback fusedCallback;
     private LocationListener gpsListener;
@@ -71,8 +56,6 @@ public class GpsModule {
 
     private Location bestLocation = null;
     private boolean isTracking = false;
-    private boolean isMapVisible = false;
-    private boolean isStealthMode = false;
     private int satelliteCount = 0;
     private int satelliteUsed = 0;
     private float currentAccuracy = Float.MAX_VALUE;
@@ -82,17 +65,22 @@ public class GpsModule {
     private double currentAltitude = 0;
     private long lastUpdateTime = 0;
 
-    private ConcurrentLinkedQueue<JSONObject> locationQueue = new ConcurrentLinkedQueue<>();
-    private List<JSONObject> trackHistory = new CopyOnWriteArrayList<>();
-    private Map<String, GeoFence> geofences = new ConcurrentHashMap<>();
-    private List<String> triggeredGeofences = new CopyOnWriteArrayList<>();
+    // Synchronized LinkedList: O(1) add/removeFirst, avoids CopyOnWriteArrayList's O(n) copy-on-write
+    private final List<JSONObject> trackHistory = Collections.synchronizedList(new LinkedList<>());
+    private final Map<String, GeoFence> geofences = new ConcurrentHashMap<>();
+    private final List<String> triggeredGeofences = new CopyOnWriteArrayList<>();
 
     private volatile boolean isSpoofingDetected = false;
 
     private long totalLocations = 0;
 
-    private SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US);
-    private DecimalFormat dfCoord = new DecimalFormat("#.0000000");
+    // ThreadLocal for thread-safe date/number formatting (SimpleDateFormat & DecimalFormat are NOT thread-safe)
+    private static final ThreadLocal<SimpleDateFormat> sdf = ThreadLocal.withInitial(
+        () -> new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
+    );
+    private static final ThreadLocal<DecimalFormat> dfCoord = ThreadLocal.withInitial(
+        () -> new DecimalFormat("#.0000000")
+    );
 
     private static class GeoFence {
         String id;
@@ -107,7 +95,8 @@ public class GpsModule {
             this.name = name;
             this.lat = lat;
             this.lng = lng;
-            this.radius = radius;
+            // Enforce minimum radius so enter hysteresis (radius - 50m) always works
+            this.radius = Math.max(radius, MIN_GEOFENCE_RADIUS);
         }
     }
 
@@ -117,13 +106,6 @@ public class GpsModule {
 
         locationManager = (LocationManager) ctx.getSystemService(Context.LOCATION_SERVICE);
         fusedClient = LocationServices.getFusedLocationProviderClient(ctx);
-        powerManager = (PowerManager) ctx.getSystemService(Context.POWER_SERVICE);
-
-        gpsThread = new HandlerThread("GpsModuleThread");
-        gpsThread.start();
-        gpsHandler = new Handler(gpsThread.getLooper());
-
-        scheduler = Executors.newScheduledThreadPool(2);
 
         taoLocationCallbacks();
         taoGnssCallbacks();
@@ -201,11 +183,7 @@ public class GpsModule {
 
         if (bestLocation != null) {
             float distance = location.distanceTo(bestLocation);
-            float timeDelta = (now - lastUpdateTime) / 1000f;
 
-            if (timeDelta > 0 && distance > 0) {
-                currentSpeed = distance / timeDelta;
-            }
             if (distance > 1) {
                 currentBearing = bestLocation.bearingTo(location);
             }
@@ -213,6 +191,9 @@ public class GpsModule {
                 totalDistance += distance;
             }
         }
+
+        // Use the device's Doppler-based speed (much more accurate than manual distance/time)
+        currentSpeed = location.hasSpeed() ? location.getSpeed() : 0;
 
         bestLocation = location;
         lastUpdateTime = now;
@@ -227,8 +208,8 @@ public class GpsModule {
     private void luuTrackHistory(Location location, String source) {
         try {
             JSONObject point = new JSONObject();
-            point.put("lat", dfCoord.format(location.getLatitude()));
-            point.put("lng", dfCoord.format(location.getLongitude()));
+            point.put("lat", dfCoord.get().format(location.getLatitude()));
+            point.put("lng", dfCoord.get().format(location.getLongitude()));
             point.put("accuracy", location.getAccuracy());
             point.put("altitude", location.getAltitude());
             point.put("speed", currentSpeed);
@@ -236,14 +217,16 @@ public class GpsModule {
             point.put("provider", location.getProvider());
             point.put("source", source);
             point.put("satellites", satelliteUsed);
-            point.put("timestamp", sdf.format(new Date(location.getTime())));
+            point.put("timestamp", sdf.get().format(new Date(location.getTime())));
 
-            // Trim oldest entries if over max (CopyOnWriteArrayList is safe for iteration)
-            while (trackHistory.size() >= MAX_TRACK_HISTORY && !trackHistory.isEmpty()) {
-                trackHistory.remove(0);
+            // Trim + add in single synchronized block for atomicity.
+            // LinkedList.removeFirst() is O(1) vs CopyOnWriteArrayList.remove(0) which was O(n).
+            synchronized (trackHistory) {
+                while (trackHistory.size() >= MAX_TRACK_HISTORY && !trackHistory.isEmpty()) {
+                    trackHistory.remove(0);
+                }
+                trackHistory.add(point);
             }
-            trackHistory.add(point);
-            locationQueue.offer(point);
         } catch (Exception ignored) {}
     }
 
@@ -253,8 +236,9 @@ public class GpsModule {
         } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR2) {
             if (location.isFromMockProvider()) return true;
         }
-        // Speed > 300 km/h is suspicious
-        if (currentSpeed > 83.33f) return true;
+        // Use the device-reported speed for spoofing check (Doppler-based, not affected by GPS jitter)
+        // Speed > 300 km/h (83.33 m/s) is suspicious
+        if (location.hasSpeed() && location.getSpeed() > 83.33f) return true;
         return false;
     }
 
@@ -267,15 +251,27 @@ public class GpsModule {
             if (!gf.isInside && distance <= gf.radius - 50) {
                 gf.isInside = true;
                 String event = "GEOFENCE_ENTER:" + gf.name;
-                triggeredGeofences.add(event);
+                addTriggeredEvent(event);
                 Log.d(TAG, event);
             } else if (gf.isInside && distance > gf.radius + 150) {
                 gf.isInside = false;
                 String event = "GEOFENCE_EXIT:" + gf.name;
-                triggeredGeofences.add(event);
+                addTriggeredEvent(event);
                 Log.d(TAG, event);
             }
         }
+    }
+
+    /** Add geofence event with bounded size to prevent unbounded memory growth. */
+    private void addTriggeredEvent(String event) {
+        while (triggeredGeofences.size() >= MAX_TRIGGERED_EVENTS) {
+            try {
+                triggeredGeofences.remove(0);
+            } catch (IndexOutOfBoundsException ignored) {
+                break;
+            }
+        }
+        triggeredGeofences.add(event);
     }
 
     private void chuyenSangNetworkFallback() {
@@ -371,7 +367,7 @@ public class GpsModule {
                 data.put(Protocol.KEY_ACCURACY, bestLocation.getAccuracy());
                 data.put(Protocol.KEY_SPEED, bestLocation.getSpeed());
                 data.put(Protocol.KEY_PROVIDER, bestLocation.getProvider());
-                data.put(Protocol.KEY_TIMESTAMP, sdf.format(new Date(bestLocation.getTime())));
+                data.put(Protocol.KEY_TIMESTAMP, sdf.get().format(new Date(bestLocation.getTime())));
                 data.put("altitude", bestLocation.getAltitude());
                 data.put("bearing", currentBearing);
                 data.put("satellites", satelliteUsed);
@@ -390,7 +386,9 @@ public class GpsModule {
         JSONObject result = new JSONObject();
         try {
             JSONArray arr = new JSONArray();
-            for (JSONObject pt : trackHistory) arr.put(pt);
+            synchronized (trackHistory) {
+                for (JSONObject pt : trackHistory) arr.put(pt);
+            }
             result.put("points", arr);
             result.put("count", trackHistory.size());
             result.put("totalDistance", totalDistance);
@@ -439,7 +437,5 @@ public class GpsModule {
                 locationManager.unregisterGnssStatusCallback(gnssStatusCallback);
             } catch (Exception ignored) {}
         }
-        if (gpsThread != null) gpsThread.quitSafely();
-        if (scheduler != null) scheduler.shutdownNow();
     }
 }

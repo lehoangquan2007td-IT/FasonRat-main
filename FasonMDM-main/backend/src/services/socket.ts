@@ -253,14 +253,17 @@ class SocketService {
         } else if (!timeValue) {
           timeValue = new Date().toISOString();
         }
-        gpsData.push({
+        const entry = {
           latitude: data.latitude, longitude: data.longitude, accuracy: data.accuracy,
           speed: data.speed, provider: data.provider,
           time: timeValue,
-        });
+        };
+        gpsData.push(entry);
         dbHelpers.setClientData(id, 'gps', JSON.stringify(gpsData));
         dbHelpers.addLog('DATA', 'GPS', `GPS location from ${id}`, JSON.stringify({ lat: data.latitude, lng: data.longitude }));
         broadcastData('gps');
+        // Emit live GPS location to admin dashboard for real-time map
+        this.io.to('admin').emit('gps:location', { id, ...entry });
       } catch (err: unknown) { log.error(`GPS handler error: ${err instanceof Error ? err.message : String(err)}`); }
     });
 

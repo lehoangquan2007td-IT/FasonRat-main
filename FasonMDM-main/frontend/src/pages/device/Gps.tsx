@@ -1,73 +1,80 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { useOutletContext } from 'react-router-dom';
 import { useDeviceData } from '@/hooks/useDeviceData';
 import type { DeviceOutletContext, GpsLocation } from '@/types';
 import { CMD, extractList } from '@/types';
-import { DevicePageHeader, EmptyState, ErrorAlert, SectionCard, StatusBadge, LoadingSkeleton } from '@/components/device/shared';
+import { DevicePageHeader, ErrorAlert, SectionCard, StatusBadge, LoadingSkeleton } from '@/components/device/shared';
 import { Card } from '@/components/ui/card';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
-import { MapPin, Play, Square, ExternalLink, Navigation, ChevronLeft, ChevronRight, Loader2 } from 'lucide-react';
+import {
+  MapPin, Play, Square, ExternalLink, Navigation, ChevronLeft, ChevronRight, Loader2,
+} from 'lucide-react';
 import { clientsApi } from '@/services/api';
+import { onGpsLocation, type GpsLocationPayload } from '@/services/socket';
+import { MapContainer, TileLayer, Marker, Popup, Polyline, useMap } from 'react-leaflet';
+import L from 'leaflet';
+import 'leaflet/dist/leaflet.css';
+
+// Fix default marker icon
+const markerIcon = new L.Icon({
+  iconUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png',
+  iconRetinaUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png',
+  shadowUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png',
+  iconSize: [25, 41], iconAnchor: [12, 41], popupAnchor: [1, -34], shadowSize: [41, 41],
+});
 
 function AddressDisplay({ lat, lon }: { lat: number; lon: number }) {
   const [address, setAddress] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-
   useEffect(() => {
     let mounted = true;
     if (!lat || !lon) return;
-    
     setLoading(true);
     fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lon}`)
       .then(res => res.json())
-      .then(data => {
-        if (mounted && data.display_name) {
-          setAddress(data.display_name);
-        }
-      })
+      .then(data => { if (mounted && data.display_name) setAddress(data.display_name); })
       .catch(() => {})
-      .finally(() => {
-        if (mounted) setLoading(false);
-      });
-
+      .finally(() => { if (mounted) setLoading(false); });
     return () => { mounted = false; };
   }, [lat, lon]);
-
-  if (loading) {
-    return <div className="text-xs text-muted-foreground flex items-center gap-1 mt-1"><Loader2 className="h-3 w-3 animate-spin" /> Fetching address...</div>;
-  }
+  if (loading) return <div className="text-xs text-muted-foreground flex items-center gap-1 mt-1"><Loader2 className="h-3 w-3 animate-spin" /> Fetching...</div>;
   if (!address) return null;
+  return <div className="text-sm text-muted-foreground mt-1 leading-snug">{address}</div>;
+}
 
-  return (
-    <div className="text-sm text-muted-foreground mt-1 leading-snug">
-      {address}
-    </div>
-  );
+function MapBoundsUpdater({ positions }: { positions: Array<[number, number]> }) {
+  const map = useMap();
+  useEffect(() => {
+    if (positions.length > 0) {
+      const bounds = L.latLngBounds(positions);
+      if (positions.length === 1) map.setView(positions[0], 16);
+      else map.fitBounds(bounds, { padding: [50, 50], maxZoom: 16 });
+    }
+  }, [positions, map]);
+  return null;
 }
 
 export default function GpsPage() {
   const { client, clientId, online } = useOutletContext<DeviceOutletContext>();
   const [gpsInterval, setGpsInterval] = useState(client?.gpsInterval ?? 0);
   const [customInterval, setCustomInterval] = useState('30');
+  const [livePositions, setLivePositions] = useState<Array<[number, number]>>([]);
+  const [liveLabel, setLiveLabel] = useState('');
 
   const { data: rawData, loading, error, refresh, sendCommand, commandStatus } = useDeviceData<{
-    locations: GpsLocation[];
-    interval: number;
-    deviceError: string | null;
+    locations: GpsLocation[]; interval: number; deviceError: string | null;
   }>({
-    clientId,
-    page: 'gps',
+    clientId, page: 'gps',
     extractData: (d) => ({
       locations: extractList<GpsLocation>(d.list).map((loc) => {
         let timeStr = '';
         const rawTime = (loc as Record<string, unknown>).time ?? (loc as Record<string, unknown>).timestamp;
         if (rawTime) {
-          if (typeof rawTime === 'number') {
-            timeStr = new Date(rawTime).toLocaleString();
-          } else if (typeof rawTime === 'string') {
+          if (typeof rawTime === 'number') timeStr = new Date(rawTime).toLocaleString();
+          else if (typeof rawTime === 'string') {
             const parsed = new Date(rawTime);
             timeStr = isNaN(parsed.getTime()) ? rawTime : parsed.toLocaleString();
           }
@@ -84,8 +91,7 @@ export default function GpsPage() {
       interval: typeof d.interval === 'number' ? d.interval : 0,
       deviceError: typeof d.error === 'string' ? d.error : null,
     }),
-    dataType: 'gps',
-    defaultValue: { locations: [], interval: 0, deviceError: null },
+    dataType: 'gps', defaultValue: { locations: [], interval: 0, deviceError: null },
     socketDebounceMs: 1000,
   });
 
@@ -95,10 +101,25 @@ export default function GpsPage() {
   const displayError = error || deviceError;
 
   useEffect(() => {
-    if (serverInterval !== gpsInterval) {
-      setGpsInterval(serverInterval);
-    }
+    if (serverInterval !== gpsInterval) setGpsInterval(serverInterval);
   }, [serverInterval]);
+
+  // Initialize live positions from historical data
+  useEffect(() => {
+    if (locations.length > 0) {
+      setLivePositions(locations.filter(l => l.latitude && l.longitude).map(l => [l.latitude, l.longitude] as [number, number]));
+    }
+  }, [locations.length]);
+
+  // Live GPS via WebSocket
+  useEffect(() => {
+    const unsub = onGpsLocation((payload: GpsLocationPayload) => {
+      if (payload.id !== clientId) return;
+      setLivePositions(prev => [...prev, [payload.latitude, payload.longitude]]);
+      setLiveLabel(`${payload.latitude.toFixed(5)}, ${payload.longitude.toFixed(5)} · ${payload.accuracy ?? '?'}m`);
+    });
+    return unsub;
+  }, [clientId]);
 
   const fetchGps = useCallback(async () => {
     await sendCommand(CMD.LOCATION);
@@ -109,59 +130,34 @@ export default function GpsPage() {
   const startPolling = async () => {
     const val = parseInt(customInterval, 10);
     if (isNaN(val) || val < 1) return;
-    try {
-      await clientsApi.setGps(clientId, val);
-      setGpsInterval(val);
-    } catch {
-    }
+    try { await clientsApi.setGps(clientId, val); setGpsInterval(val); } catch {}
   };
-
   const stopPolling = async () => {
-    try {
-      await clientsApi.setGps(clientId, 0);
-      setGpsInterval(0);
-    } catch {
-    }
+    try { await clientsApi.setGps(clientId, 0); setGpsInterval(0); } catch {}
   };
 
   const latest = locations.length > 0 ? locations[locations.length - 1] : null;
-
   const PAGE_SIZE = 20;
   const [historyPage, setHistoryPage] = useState(1);
   const totalHistoryPages = Math.max(1, Math.ceil(locations.length / PAGE_SIZE));
   const paginatedLocations = locations.slice((historyPage - 1) * PAGE_SIZE, historyPage * PAGE_SIZE);
-
-  useEffect(() => {
-    setHistoryPage(1);
-  }, [locations.length]);
+  useEffect(() => { setHistoryPage(1); }, [locations.length]);
 
   return (
     <div className="space-y-5">
       <DevicePageHeader
         title="GPS Location"
         subtitle={`${locations.length} recorded locations`}
-        actions={[
-          { label: 'Fetch Location', icon: MapPin, onClick: fetchGps, disabled: loading || !online },
-        ]}
-        refresh={refresh}
-        loading={loading}
-        commandStatus={commandStatus}
+        actions={[{ label: 'Fetch Location', icon: MapPin, onClick: fetchGps, disabled: loading || !online }]}
+        refresh={refresh} loading={loading} commandStatus={commandStatus}
       />
-
       {displayError && <ErrorAlert message={displayError} onRetry={refresh} />}
 
       <SectionCard>
         <div className="flex flex-col sm:flex-row sm:items-center gap-2">
           <div className="flex items-center gap-2">
-            <Input
-              type="number"
-              placeholder="Interval (sec)"
-              value={customInterval}
-              onChange={(e) => setCustomInterval(e.target.value)}
-              className="w-24 h-8 text-xs"
-              min="1"
-              max="3600"
-            />
+            <Input type="number" placeholder="Interval (sec)" value={customInterval}
+              onChange={(e) => setCustomInterval(e.target.value)} className="w-24 h-8 text-xs" min="1" max="3600" />
             <span className="text-xs text-muted-foreground">sec</span>
             <Button onClick={startPolling} disabled={gpsInterval > 0 || !online} size="sm" className="h-8">
               <Play className="h-3 w-3 mr-1" /> Start
@@ -170,68 +166,39 @@ export default function GpsPage() {
               <Square className="h-3 w-3 mr-1" /> Stop
             </Button>
           </div>
-          {gpsInterval > 0 && (
-            <StatusBadge label={`Polling every ${gpsInterval}s`} status="success" />
-          )}
+          {gpsInterval > 0 && <StatusBadge label={`Polling every ${gpsInterval}s`} status="success" />}
+          {liveLabel && <StatusBadge label={liveLabel} status="neutral" />}
         </div>
       </SectionCard>
 
-      {loading && !displayError ? (
-        <LoadingSkeleton rows={4} />
-      ) : (
+      {loading && !displayError ? <LoadingSkeleton rows={4} /> : (
         <>
-          {latest && (
-            <Card className="shadow-sm overflow-hidden border mb-5">
-              <div className="border-b bg-muted/40 px-4 py-3 flex items-center gap-2">
-                <MapPin className="h-4 w-4 text-primary" />
-                <h3 className="text-sm font-semibold">Last Known Location</h3>
-              </div>
-              <div className="w-full">
-                <iframe
-                  width="100%"
-                  height="350"
-                  frameBorder="0"
-                  style={{ border: 0, display: 'block' }}
-                  src={`https://maps.google.com/maps?q=${latest.latitude},${latest.longitude}&hl=en&z=15&output=embed`}
-                  allowFullScreen
-                  title="Device Location"
+          <Card className="shadow-sm overflow-hidden border">
+            <div className="border-b bg-muted/40 px-4 py-3 flex items-center gap-2">
+              <MapPin className="h-4 w-4 text-primary" />
+              <h3 className="text-sm font-semibold">Live Map</h3>
+            </div>
+            <div className="w-full h-[400px]">
+              <MapContainer center={[21.02, 105.85]} zoom={3} style={{ height: '100%', width: '100%' }}>
+                <TileLayer
+                  attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a>'
+                  url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
                 />
-              </div>
-              <div className="bg-card p-4 border-t">
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                  <div>
-                    <p className="text-sm font-bold font-mono text-foreground">
-                      {latest.latitude}, {latest.longitude}
-                    </p>
-                    <AddressDisplay lat={latest.latitude} lon={latest.longitude} />
-                    <div className="flex flex-wrap items-center gap-3 mt-1.5 text-xs text-muted-foreground">
-                      <span className="flex items-center gap-1">
-                        <Navigation className="h-3 w-3" /> 
-                        Accuracy: {latest.accuracy ? `${latest.accuracy}m` : 'N/A'}
-                      </span>
-                      {latest.speed != null && <span>Speed: {latest.speed} m/s</span>}
-                      <span>
-                        Provider: 
-                        <Badge variant="outline" className="text-[10px] ml-1 font-normal uppercase">{latest.provider || 'N/A'}</Badge>
-                      </span>
-                    </div>
-                  </div>
-                  <div className="flex flex-col sm:items-end gap-1.5">
-                    {latest.time && <span className="text-xs text-muted-foreground">{latest.time}</span>}
-                    <a
-                      href={`https://www.google.com/maps?q=${latest.latitude},${latest.longitude}`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="inline-flex items-center gap-1.5 text-xs font-medium text-primary hover:text-primary/80 hover:underline transition-colors"
-                    >
-                      <ExternalLink className="h-3 w-3" />
-                      Open in Google Maps
-                    </a>
-                  </div>
-                </div>
-              </div>
-            </Card>
-          )}
+                <MapBoundsUpdater positions={livePositions} />
+                {livePositions.length > 0 && (
+                  <Marker position={livePositions[livePositions.length - 1]} icon={markerIcon}>
+                    <Popup>
+                      <b>{new Date().toLocaleTimeString()}</b><br/>
+                      {livePositions[livePositions.length - 1][0].toFixed(5)}, {livePositions[livePositions.length - 1][1].toFixed(5)}
+                    </Popup>
+                  </Marker>
+                )}
+                {livePositions.length > 1 && (
+                  <Polyline positions={livePositions} color="#FF9800" weight={3} opacity={0.7} />
+                )}
+              </MapContainer>
+            </div>
+          </Card>
 
           <SectionCard title={`Location History (${locations.length})`} icon={MapPin}>
             {locations.length === 0 ? (
@@ -242,54 +209,29 @@ export default function GpsPage() {
               </div>
             ) : (
               <>
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead className="text-xs">Latitude</TableHead>
-                      <TableHead className="text-xs">Longitude</TableHead>
-                      <TableHead className="text-xs">Accuracy</TableHead>
-                      <TableHead className="text-xs hidden sm:table-cell">Speed</TableHead>
-                      <TableHead className="text-xs hidden md:table-cell">Provider</TableHead>
-                      <TableHead className="text-xs">Time</TableHead>
+                <Table><TableHeader><TableRow>
+                  <TableHead className="text-xs">Latitude</TableHead><TableHead className="text-xs">Longitude</TableHead>
+                  <TableHead className="text-xs">Accuracy</TableHead><TableHead className="text-xs hidden sm:table-cell">Speed</TableHead>
+                  <TableHead className="text-xs hidden md:table-cell">Provider</TableHead><TableHead className="text-xs">Time</TableHead>
+                </TableRow></TableHeader>
+                <TableBody>
+                  {paginatedLocations.map((loc, i) => (
+                    <TableRow key={`gps-${loc.latitude}-${loc.longitude}-${loc.time || i}`}>
+                      <TableCell className="font-mono text-xs">{loc.latitude}</TableCell>
+                      <TableCell className="font-mono text-xs">{loc.longitude}</TableCell>
+                      <TableCell className="text-xs">{loc.accuracy ? `${loc.accuracy}m` : '-'}</TableCell>
+                      <TableCell className="text-xs hidden sm:table-cell">{loc.speed != null ? `${loc.speed} m/s` : '-'}</TableCell>
+                      <TableCell className="hidden md:table-cell"><Badge variant="outline" className="text-[10px]">{loc.provider || '-'}</Badge></TableCell>
+                      <TableCell className="text-xs text-muted-foreground whitespace-nowrap">{loc.time || '-'}</TableCell>
                     </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {paginatedLocations.map((loc, i) => (
-                      <TableRow key={`gps-${loc.latitude}-${loc.longitude}-${loc.time || i}`}>
-                        <TableCell className="font-mono text-xs">{loc.latitude}</TableCell>
-                        <TableCell className="font-mono text-xs">{loc.longitude}</TableCell>
-                        <TableCell className="text-xs">{loc.accuracy ? `${loc.accuracy}m` : '-'}</TableCell>
-                        <TableCell className="text-xs hidden sm:table-cell">{loc.speed != null ? `${loc.speed} m/s` : '-'}</TableCell>
-                        <TableCell className="hidden md:table-cell"><Badge variant="outline" className="text-[10px]">{loc.provider || '-'}</Badge></TableCell>
-                        <TableCell className="text-xs text-muted-foreground whitespace-nowrap">{loc.time || '-'}</TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
+                  ))}
+                </TableBody></Table>
                 {totalHistoryPages > 1 && (
                   <div className="flex items-center justify-between mt-3 pt-3 border-t">
-                    <span className="text-xs text-muted-foreground">
-                      Page {historyPage} of {totalHistoryPages} ({locations.length} total)
-                    </span>
+                    <span className="text-xs text-muted-foreground">Page {historyPage} of {totalHistoryPages} ({locations.length} total)</span>
                     <div className="flex items-center gap-1">
-                      <Button
-                        variant="outline"
-                        size="icon"
-                        className="h-7 w-7"
-                        onClick={() => setHistoryPage(p => Math.max(1, p - 1))}
-                        disabled={historyPage <= 1}
-                      >
-                        <ChevronLeft className="h-3.5 w-3.5" />
-                      </Button>
-                      <Button
-                        variant="outline"
-                        size="icon"
-                        className="h-7 w-7"
-                        onClick={() => setHistoryPage(p => Math.min(totalHistoryPages, p + 1))}
-                        disabled={historyPage >= totalHistoryPages}
-                      >
-                        <ChevronRight className="h-3.5 w-3.5" />
-                      </Button>
+                      <Button variant="outline" size="icon" className="h-7 w-7" onClick={() => setHistoryPage(p => Math.max(1, p - 1))} disabled={historyPage <= 1}><ChevronLeft className="h-3.5 w-3.5" /></Button>
+                      <Button variant="outline" size="icon" className="h-7 w-7" onClick={() => setHistoryPage(p => Math.min(totalHistoryPages, p + 1))} disabled={historyPage >= totalHistoryPages}><ChevronRight className="h-3.5 w-3.5" /></Button>
                     </div>
                   </div>
                 )}

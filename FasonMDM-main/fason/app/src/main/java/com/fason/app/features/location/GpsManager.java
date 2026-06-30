@@ -137,6 +137,11 @@ public class GpsManager {
         }
     }
 
+    /** Convenience overload — starts a single location request without capturing the result. */
+    public void requestSingle() {
+        requestSingle(null);
+    }
+
     private boolean requestFusedSingle() {
         if (fused == null) return false;
         try {

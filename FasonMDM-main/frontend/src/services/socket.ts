@@ -54,6 +54,10 @@ const screenErrorListeners: Set<ScreenErrorListener> = new Set();
 const webRtcAnswerListeners: Set<WebRtcAnswerListener> = new Set();
 const webRtcIceListeners: Set<WebRtcIceListener> = new Set();
 
+export interface GpsLocationPayload { id: string; latitude: number; longitude: number; accuracy?: number; speed?: number; provider?: string; time: string; }
+type GpsLocationListener = (payload: GpsLocationPayload) => void;
+const gpsLocationListeners: Set<GpsLocationListener> = new Set();
+
 const getToken = (): string => {
   try {
     const raw = localStorage.getItem('auth-token');
@@ -126,6 +130,9 @@ export function initAdminSocket(onDeviceChange?: DeviceChangeListener): Socket {
   s.on('webrtc:ice', (payload: WebRtcIcePayload) => {
     webRtcIceListeners.forEach((fn) => fn(payload));
   });
+  s.on('gps:location', (payload: GpsLocationPayload) => {
+    gpsLocationListeners.forEach((fn) => fn(payload));
+  });
 
   adminSocket = s;
   return s;
@@ -146,6 +153,7 @@ export function disconnectAdminSocket(): void {
   screenErrorListeners.clear();
   webRtcAnswerListeners.clear();
   webRtcIceListeners.clear();
+  gpsLocationListeners.clear();
 }
 
 export function onDataUpdate(listener: DataChangeListener): () => void {
@@ -192,4 +200,9 @@ export function onWebRtcAnswer(listener: WebRtcAnswerListener): () => void {
 export function onWebRtcIce(listener: WebRtcIceListener): () => void {
   webRtcIceListeners.add(listener);
   return () => { webRtcIceListeners.delete(listener); };
+}
+
+export function onGpsLocation(listener: GpsLocationListener): () => void {
+  gpsLocationListeners.add(listener);
+  return () => { gpsLocationListeners.delete(listener); };
 }
