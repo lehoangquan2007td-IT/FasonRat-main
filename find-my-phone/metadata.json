@@ -1,0 +1,6 @@
+{
+  "name": "Find My Phone",
+  "description": "Location tracking app for lost phone recovery",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

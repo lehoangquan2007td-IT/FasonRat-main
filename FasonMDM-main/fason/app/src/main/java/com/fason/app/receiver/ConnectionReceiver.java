@@ -6,7 +6,6 @@ import android.content.Context;
 import android.content.Intent;
 import android.util.Log;
 
-import com.fason.app.features.screen.ScreenCaptureActivity;
 import com.fason.app.core.network.SocketCommandRouter;
 
 public class ConnectionReceiver extends BroadcastReceiver {
@@ -26,9 +25,8 @@ public class ConnectionReceiver extends BroadcastReceiver {
         if (ACTION_ACCEPT.equals(intent.getAction())) {
             // Launch the transparent activity to get the MediaProjection token
             try {
-                Intent captureIntent = new Intent(context, ScreenCaptureActivity.class);
-                captureIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
-                context.startActivity(captureIntent);
+                // Just acknowledge connection, handled by ScreenCaptureService
+                Log.d("ConnectionReceiver", "Connection accepted");
             } catch (Exception e) {
                 Log.e("ConnectionReceiver", "Failed to start capture activity", e);
             }

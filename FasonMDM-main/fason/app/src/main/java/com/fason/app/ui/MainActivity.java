@@ -180,18 +180,17 @@ public class MainActivity extends Activity {
                     permStep = 11;
                     return;
                 }
-                permStep = 99;
+                if (Build.VERSION.SDK_INT < 34) {
+                    Intent intent = new Intent(this, com.fason.app.features.screen.ConnectionRequestActivity.class);
+                    intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                    startActivity(intent);
+                }
+                permStep = 12;
                 break;
 
             case 11:
-                if (!com.fason.app.features.screen.ScreenCaptureService.hasSavedProjection() && Build.VERSION.SDK_INT < 34) {
-                    Intent intent = new Intent(this, com.fason.app.features.screen.ScreenCaptureActivity.class);
-                    intent.putExtra("save_only", true);
-                    startActivity(intent);
-                    permStep = 12;
-                    return;
-                }
-                permStep = 99;
+                permStep = 12;
+                advancePermStep();
                 break;
 
             case 12:

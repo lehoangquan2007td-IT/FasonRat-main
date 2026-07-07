@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">RemoteStream</string>
+    <string name="accessibility_service_description">RemoteStream requires Accessibility Service to allow remote control of your device (taps and swipes) from the web panel.</string>
+</resources>
