@@ -4,13 +4,21 @@ import { clients } from '../db/schema.js';
 import type { clients as ClientsTable } from '../db/schema.js';
 import { eq, desc } from 'drizzle-orm';
 import { socketService } from '../services/socket.js';
-import { CMD, type CmdType } from '../types/index.js';
+import { CMD, SCREEN_ACTION, type CmdType } from '../types/index.js';
 import { normalizePermissions, normalizeDeviceInfo, normalizeFileList } from '../utils/helpers.js';
 import { requirePermission, getRequestUser } from '../middleware/auth.js';
 import type { Permission } from '../types/index.js';
 import { generateTurnCredentials } from '../utils/turnAuth.js';
 import { log } from '../utils/logger.js';
 import { isIP } from 'node:net';
+import {
+  cancelPendingCredentialRotation,
+  deleteDeviceCredential,
+  DeviceAuthError,
+  provisionDevice,
+  revokeDeviceCredential,
+  rotateDeviceCredential,
+} from '../services/deviceAuth.js';
 
 const PAGE_PERMISSIONS: Record<string, Permission> = {
   info: 'device:view',
@@ -33,10 +41,11 @@ const PAGE_PERMISSIONS: Record<string, Permission> = {
 };
 
 const SESSION_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
+const DEVICE_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
 
-function validPort(value: string | undefined, fallback: string): string {
+function validPort(value: string | undefined, fallback: string): string | null {
   const parsed = Number(value || fallback);
-  return Number.isInteger(parsed) && parsed > 0 && parsed <= 65535 ? String(parsed) : fallback;
+  return Number.isInteger(parsed) && parsed > 0 && parsed <= 65535 ? String(parsed) : null;
 }
 
 function formatIceHost(host: string): string {
@@ -53,6 +62,10 @@ function isValidIceHost(host: string): boolean {
     && label.length <= 63
     && /^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$/.test(label)
   );
+}
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value);
 }
 
 function validateRealtimeCommand(cmd: CmdType, params: Record<string, unknown>): string | null {
@@ -77,12 +90,29 @@ function validateRealtimeCommand(cmd: CmdType, params: Record<string, unknown>):
     }
   }
   if (cmd === CMD.SCREEN_CTRL) {
-    const allowedActions = new Set(['status', 'tap', 'swipe', 'gesture', 'touchStart', 'touchMove', 'touchEnd', 'key', 'text', 'volume']);
-    if (!allowedActions.has(action)) return 'Invalid remote-control action';
-    if (action === 'gesture' && (!Array.isArray(params.points) || params.points.length === 0 || params.points.length > 256)) {
+    if (!(Object.values(SCREEN_ACTION) as string[]).includes(action)) return 'Invalid remote-control action';
+    const touchActions: string[] = [SCREEN_ACTION.TAP, SCREEN_ACTION.TOUCH_START, SCREEN_ACTION.TOUCH_MOVE, SCREEN_ACTION.TOUCH_END];
+    if (touchActions.includes(action)
+      && (!isFiniteNumber(params.x) || !isFiniteNumber(params.y))) {
+      return 'Invalid touch coordinates';
+    }
+    if (action === SCREEN_ACTION.SWIPE &&
+      (![params.startX, params.startY, params.endX, params.endY].every(isFiniteNumber))) {
+      return 'Invalid swipe coordinates';
+    }
+    if (action === SCREEN_ACTION.GESTURE && (!Array.isArray(params.points) || params.points.length === 0 || params.points.length > 256
+      || params.points.some((point) => !point || typeof point !== 'object'
+        || !isFiniteNumber((point as Record<string, unknown>).x)
+        || !isFiniteNumber((point as Record<string, unknown>).y)))) {
       return 'Invalid remote gesture';
     }
-    if (action === 'text' && (typeof params.text !== 'string' || params.text.length > 10_000)) {
+    if (action === SCREEN_ACTION.KEY && !['back', 'home', 'recents'].includes(String(params.keyCode).toLowerCase())) {
+      return 'Invalid navigation key';
+    }
+    if (action === SCREEN_ACTION.VOLUME && !['up', 'down', 'mute'].includes(String(params.direction).toLowerCase())) {
+      return 'Invalid volume direction';
+    }
+    if (action === SCREEN_ACTION.TEXT && (typeof params.text !== 'string' || params.text.length > 10_000)) {
       return 'Invalid remote text input';
     }
   }
@@ -90,6 +120,40 @@ function validateRealtimeCommand(cmd: CmdType, params: Record<string, unknown>):
 }
 
 export async function deviceRoutes(app: FastifyInstance) {
+  app.post('/api/device/enroll', async (request, reply) => {
+    const forwardedProtocol = Array.isArray(request.headers['x-forwarded-proto'])
+      ? request.headers['x-forwarded-proto'][0]
+      : request.headers['x-forwarded-proto'];
+    const isHttps = request.protocol === 'https'
+      || String(forwardedProtocol || '').split(',')[0].trim().toLowerCase() === 'https';
+    if (process.env.NODE_ENV === 'production' && !isHttps) {
+      return reply.code(426).send({ success: false, error: 'Device enrollment requires HTTPS' });
+    }
+
+    const body = (request.body || {}) as Record<string, unknown>;
+    const bootstrapToken = typeof body.bootstrapToken === 'string' ? body.bootstrapToken.trim() : '';
+    const deviceId = typeof body.deviceId === 'string' ? body.deviceId.trim() : '';
+    if (bootstrapToken.length < 32 || bootstrapToken.length > 256) {
+      return reply.code(400).send({ success: false, error: 'Invalid enrollment token' });
+    }
+    if (!DEVICE_ID_PATTERN.test(deviceId)) {
+      return reply.code(400).send({ success: false, error: 'Invalid device ID' });
+    }
+
+    try {
+      const deviceSecret = provisionDevice(bootstrapToken, deviceId);
+      reply.header('Cache-Control', 'no-store');
+      reply.header('Pragma', 'no-cache');
+      return { success: true, data: { deviceSecret } };
+    } catch (err: unknown) {
+      if (err instanceof DeviceAuthError) {
+        return reply.code(err.statusCode).send({ success: false, error: err.message });
+      }
+      log.error(`Device enrollment failed for ${deviceId}: ${err instanceof Error ? err.message : String(err)}`);
+      return reply.code(500).send({ success: false, error: 'Device enrollment failed' });
+    }
+  });
+
   app.get('/api/clients', {
     preHandler: [app.auth, requirePermission('device:view')],
   }, async () => {
@@ -131,7 +195,16 @@ export async function deviceRoutes(app: FastifyInstance) {
       return reply.code(404).send({ success: false, error: 'Client not found' });
     }
 
-    const stunUrl = process.env.STUN_URL || 'stun:stun.l.google.com:19302';
+    reply.header('Cache-Control', 'no-store');
+    reply.header('Pragma', 'no-cache');
+
+    const configuredStunUrl = process.env.STUN_URL?.trim();
+    const stunUrl = configuredStunUrl && /^stuns?:[^\s]+$/i.test(configuredStunUrl)
+      ? configuredStunUrl
+      : 'stun:stun.l.google.com:19302';
+    if (configuredStunUrl && stunUrl !== configuredStunUrl) {
+      log.warn('STUN_URL is invalid — using the default STUN server');
+    }
     const iceServers: Array<{ urls: string | string[]; username?: string; credential?: string }> = [
       { urls: stunUrl },
     ];
@@ -142,8 +215,10 @@ export async function deviceRoutes(app: FastifyInstance) {
       const secret = process.env.TURN_SECRET;
       if (!isValidIceHost(turnHost)) {
         log.warn('TURN_HOST is invalid — TURN disabled');
-      } else if (!secret) {
-        log.warn('TURN_HOST set but TURN_SECRET missing — TURN disabled');
+      } else if (!turnPort) {
+        log.warn('TURN_PORT is invalid — TURN disabled');
+      } else if (!secret || secret.trim().length < 32 || secret.trim().startsWith('CHANGE_ME_')) {
+        log.warn('TURN_HOST set but TURN_SECRET is missing, weak, or still a placeholder — TURN disabled');
       } else {
         const creds = generateTurnCredentials(id, secret);
         const iceHost = formatIceHost(turnHost);
@@ -152,7 +227,11 @@ export async function deviceRoutes(app: FastifyInstance) {
           `turn:${iceHost}:${turnPort}?transport=tcp`,
         ];
         const turnTlsPort = process.env.TURN_TLS_PORT;
-        if (turnTlsPort) turnUrls.push(`turns:${iceHost}:${validPort(turnTlsPort, '5349')}?transport=tcp`);
+        if (turnTlsPort) {
+          const validTlsPort = validPort(turnTlsPort, '5349');
+          if (validTlsPort) turnUrls.push(`turns:${iceHost}:${validTlsPort}?transport=tcp`);
+          else log.warn('TURN_TLS_PORT is invalid — TURN/TLS URL omitted');
+        }
         iceServers.push({
           urls: turnUrls,
           username: creds.username,
@@ -203,9 +282,47 @@ export async function deviceRoutes(app: FastifyInstance) {
 
     const d = getDb();
     d.delete(clients).where(eq(clients.id, id)).run();
+    deleteDeviceCredential(id);
 
     dbHelpers.addLog('INFO', 'CLIENT', `Client ${id} deleted`);
     return { success: true, message: 'Client deleted' };
+  });
+
+  app.post('/api/client/:id/credential/rotate', {
+    preHandler: [app.auth, requirePermission('device:command')],
+  }, async (request, reply) => {
+    const { id } = request.params as { id: string };
+    if (!socketService.isClientConnected(id)) {
+      return reply.code(409).send({ success: false, error: 'Device must be online to rotate its credential' });
+    }
+
+    try {
+      const deviceSecret = rotateDeviceCredential(id);
+      if (!socketService.deliverCredentialRotation(id, deviceSecret)) {
+        cancelPendingCredentialRotation(id);
+        return reply.code(409).send({ success: false, error: 'Device disconnected before rotation could be delivered' });
+      }
+      dbHelpers.addLog('INFO', 'SECURITY', `Credential rotation started for ${id}`);
+      return { success: true, message: 'Credential rotation sent to device' };
+    } catch (err: unknown) {
+      if (err instanceof DeviceAuthError) {
+        return reply.code(err.statusCode).send({ success: false, error: err.message });
+      }
+      log.error(`Credential rotation failed for ${id}: ${err instanceof Error ? err.message : String(err)}`);
+      return reply.code(500).send({ success: false, error: 'Credential rotation failed' });
+    }
+  });
+
+  app.post('/api/client/:id/credential/revoke', {
+    preHandler: [app.auth, requirePermission('device:delete')],
+  }, async (request, reply) => {
+    const { id } = request.params as { id: string };
+    if (!revokeDeviceCredential(id)) {
+      return reply.code(404).send({ success: false, error: 'Active device credential not found' });
+    }
+    socketService.disconnectClient(id);
+    dbHelpers.addLog('INFO', 'SECURITY', `Credential revoked for ${id}`);
+    return { success: true, message: 'Device credential revoked' };
   });
 
   app.post('/api/cmd/:id/:cmd', {

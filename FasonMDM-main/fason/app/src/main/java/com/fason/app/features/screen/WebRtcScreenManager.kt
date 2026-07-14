@@ -1,6 +1,5 @@
 package com.fason.app.features.screen
 
-import android.content.Context
 import android.content.Intent
 import android.media.projection.MediaProjection
 import android.os.Build
@@ -260,7 +259,12 @@ object WebRtcScreenManager {
                 handler.post {
                     if (generation != projectionGeneration) return@post
                     val density = FasonApp.getContext().resources.configuration.densityDpi
-                    ScreenCaptureService.updateCapturedDimensions(width, height, density)
+                    ScreenCaptureService.updateCapturedDimensions(
+                        width,
+                        height,
+                        density,
+                        ScreenCaptureService.screenRotation,
+                    )
                     applyCaptureFormat(width, height, density)
                 }
             }
@@ -447,11 +451,12 @@ object WebRtcScreenManager {
         if (channel.state() != DataChannel.State.OPEN) return
         val payload = JSONObject().apply {
             put("type", "screen-info")
-            put("screenWidth", ScreenCaptureService.screenWidth.takeIf { it > 0 } ?: captureWidth)
-            put("screenHeight", ScreenCaptureService.screenHeight.takeIf { it > 0 } ?: captureHeight)
-            put("captureWidth", captureWidth)
-            put("captureHeight", captureHeight)
-            put("densityDpi", captureDpi)
+            put(Protocol.KEY_SCREEN_W, ScreenCaptureService.screenWidth.takeIf { it > 0 } ?: captureWidth)
+            put(Protocol.KEY_SCREEN_H, ScreenCaptureService.screenHeight.takeIf { it > 0 } ?: captureHeight)
+            put(Protocol.KEY_CAPTURE_W, captureWidth)
+            put(Protocol.KEY_CAPTURE_H, captureHeight)
+            put(Protocol.KEY_DENSITY_DPI, captureDpi)
+            put(Protocol.KEY_ROTATION, ScreenCaptureService.screenRotation)
         }.toString().toByteArray(StandardCharsets.UTF_8)
         channel.send(DataChannel.Buffer(ByteBuffer.wrap(payload), false))
     }
@@ -551,9 +556,10 @@ object WebRtcScreenManager {
             put(Protocol.KEY_STREAMING, streaming)
             put(Protocol.KEY_SCREEN_W, deviceWidth)
             put(Protocol.KEY_SCREEN_H, deviceHeight)
-            put("captureWidth", captureWidth)
-            put("captureHeight", captureHeight)
-            put("densityDpi", captureDpi)
+            put(Protocol.KEY_CAPTURE_W, captureWidth)
+            put(Protocol.KEY_CAPTURE_H, captureHeight)
+            put(Protocol.KEY_DENSITY_DPI, captureDpi)
+            put(Protocol.KEY_ROTATION, ScreenCaptureService.screenRotation)
             put("fps", FPS)
             put("transport", "webrtc")
             put("connectionState", connectionState)

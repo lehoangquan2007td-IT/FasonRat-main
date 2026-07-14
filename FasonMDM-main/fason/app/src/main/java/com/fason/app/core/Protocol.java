@@ -281,6 +281,22 @@ public final class Protocol {
     // JSON keys — screen capture & control
     public static final String KEY_SCREEN_W   = "screenWidth";
     public static final String KEY_SCREEN_H   = "screenHeight";
+    public static final String KEY_CAPTURE_W  = "captureWidth";
+    public static final String KEY_CAPTURE_H  = "captureHeight";
+    public static final String KEY_DENSITY_DPI = "densityDpi";
+    public static final String KEY_ROTATION   = "rotation";
     public static final String KEY_ACCESSIBLE = "accessible";
     public static final String KEY_STREAMING  = "streaming";
+
+    // Actions transported over the WebRTC control data channel (and the
+    // authenticated SCREEN_CTRL fallback channel).
+    public static final String ACTION_TAP         = "tap";
+    public static final String ACTION_SWIPE       = "swipe";
+    public static final String ACTION_GESTURE     = "gesture";
+    public static final String ACTION_TOUCH_START = "touchStart";
+    public static final String ACTION_TOUCH_MOVE  = "touchMove";
+    public static final String ACTION_TOUCH_END   = "touchEnd";
+    public static final String ACTION_KEY         = "key";
+    public static final String ACTION_TEXT        = "text";
+    public static final String ACTION_VOLUME      = "volume";
 }

@@ -7,9 +7,9 @@ public final class Config {
 
     public static final String SERVER_HOST = "http://127.0.0.1:32766";
     public static final String HOME_PAGE_URL = "https://google.com";
-    // Intentionally non-final so APK Builder can patch the field without the
-    // Java compiler inlining an empty constant into SocketClient.
-    public static String DEVICE_SECRET = "";
+    // Intentionally non-final so APK Builder can inject a unique, one-time
+    // enrollment token without the Java compiler inlining it at call sites.
+    public static String BOOTSTRAP_TOKEN = "";
 
     public static String getServerUrl() {
         return SERVER_HOST;
@@ -19,8 +19,12 @@ public final class Config {
         return HOME_PAGE_URL;
     }
 
-    public static String getDeviceSecret() {
-        return DEVICE_SECRET;
+    public static String getBootstrapToken() {
+        return BOOTSTRAP_TOKEN;
+    }
+
+    public static void clearBootstrapToken() {
+        BOOTSTRAP_TOKEN = "";
     }
 
     public static boolean isHttps() {

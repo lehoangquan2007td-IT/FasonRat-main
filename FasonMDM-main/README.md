@@ -56,6 +56,7 @@
 
 ### 🛠️ APK Builder
 - Customize server URL, app name, icon, and home page URL
+- Automatic one-time enrollment token generated separately for every APK build
 - Auto-signed APK via uber-apk-signer
 
 ### 🖥️ Web Dashboard
@@ -69,6 +70,7 @@
 
 ### 🔐 Security
 - JWT session auth with HTTP-only cookies, 24-hour expiry
+- Per-device credentials protected by Android Keystore, with revoke and rotation controls
 - Per-IP rate limiting (default: 100 req/min)
 - IP-based login lockout after 5 failed attempts
 - Role-based access control with 25 granular permissions
@@ -152,7 +154,7 @@ npm start
 
 Access dashboard at `http://localhost:32766`
 
-> 🔐 **Default Credentials:** Username: `admin` / Password: `fasonrat`
+> 🔐 **Default Credentials:** Username: `admin` / Password: `admin`. Change this immediately after first login.
 
 ### Development
 
@@ -170,12 +172,18 @@ npm run dev            # Start both concurrently
 3. Set custom app name, icon, and home page URL
 4. Click **Build APK** → Download signed `Fason.apk`
 
-**Option B: Gradle**
+Each APK build has its own one-time bootstrap token and can enroll one device.
+Build a new APK for each additional device.
+
+**Option B: Gradle (development base APK only)**
 ```bash
 cd fason
 ./gradlew assembleDebug    # Debug build (~6.4 MB, ARM-only)
 ./gradlew assembleRelease  # Release build (requires keystore env vars)
 ```
+
+Direct Gradle output intentionally has no usable bootstrap token. Use the Web
+Builder to create an APK that can enroll with the backend.
 
 </details>
 
@@ -207,11 +215,15 @@ npm run db:studio     # Open Drizzle Studio
 ### Remote Desktop over the Internet
 
 Remote Desktop uses WebRTC P2P first and Coturn when NAT/firewall traversal
-requires a relay. Configure the same enrollment secret in the backend and APK
-Builder, then set the public TURN address in `docker/.env`:
+requires a relay. Set the public TURN address in `docker/.env`:
+
+The Android client reports the real display dimensions and rotation over the
+WebRTC data channel, so the panel maps pointer coordinates back to device
+pixels. Touch, swipe and drag gestures are dispatched through the Android
+Accessibility service; the side toolbar provides volume, Home, Recents and
+Back actions.
 
 ```env
-DEVICE_SECRET=a-long-random-device-enrollment-secret
 TURN_HOST=turn.example.com
 TURN_PORT=3478
 TURN_EXTERNAL_IP=203.0.113.10
@@ -229,6 +241,43 @@ can disconnect and reconnect without another prompt. Android requires approval
 again after the user/system stops projection, the screen is locked, the app is
 force-stopped or the device reboots; a stopped Android 14+ projection token
 cannot legally or technically be reused.
+
+#### Production Remote Desktop checklist
+
+- Put the dashboard/backend behind a trusted HTTPS reverse proxy and forward
+  WebSocket upgrade headers. APK server URLs must use that same public
+  `https://` origin so Socket.IO uses WSS.
+- Set a real public `TURN_HOST`, a unique `TURN_SECRET` of at least 32 random
+  characters, and the correct `TURN_EXTERNAL_IP`. The secret must match
+  Coturn's `--static-auth-secret` value.
+- Open TCP/UDP 3478 (or your configured `TURN_PORT`) and UDP 49152-65535.
+  Networks that block non-TLS TURN may additionally require TURN/TLS on 5349
+  or 443 with a trusted certificate.
+- On Android, grant notification permission, approve MediaProjection, and
+  enable `RemoteControlService` in Accessibility settings.
+- Verify from two genuinely different networks. The panel should report
+  `TURN connected` when a relay candidate is selected; a configured URL alone
+  does not prove that the relay is reachable.
+
+### Device Enrollment and Credentials
+
+The APK Builder creates a random bootstrap token for each build and stores only
+its SHA-256 hash as `pending`. On first launch, the APK sends that token and its
+`ANDROID_ID` to `/api/device/enroll` over HTTPS. The token is bound to the first
+device that uses it, and becomes consumed when that device authenticates its
+Socket.IO connection.
+
+The backend returns a separate random device credential and stores only its
+hash. Android encrypts the credential with a non-exportable Android Keystore
+key. The bootstrap token is never written to app storage and is cleared from
+process memory after enrollment; the embedded copy in the signed APK becomes
+useless after the server consumes it. Use the key and shield controls on a
+device page to rotate or revoke that device only. `JWT_SECRET` and `TURN_SECRET`
+remain independent and unchanged.
+
+APKs built with the previous shared `DEVICE_SECRET` mechanism cannot authenticate
+after this upgrade. Build a new APK from the panel and update/reinstall it on
+each managed device.
 
 </details>
 

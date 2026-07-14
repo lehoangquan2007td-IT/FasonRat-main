@@ -16,6 +16,7 @@ export interface ScreenStatusPayload {
   captureWidth?: number;
   captureHeight?: number;
   densityDpi?: number;
+  rotation?: number;
   fps?: number;
   accessible?: boolean;
   transport?: 'webrtc';

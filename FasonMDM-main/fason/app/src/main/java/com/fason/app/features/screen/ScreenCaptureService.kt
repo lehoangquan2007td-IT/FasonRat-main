@@ -8,16 +8,14 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.res.Configuration
-import android.graphics.Rect
+import android.hardware.display.DisplayManager
 import android.os.Build
 import android.os.IBinder
 import android.util.DisplayMetrics
+import android.view.Display
 import android.view.WindowManager
 import androidx.core.app.NotificationCompat
 import com.fason.app.R
-import com.fason.app.core.Protocol
-import com.fason.app.core.network.SocketClient
-import org.json.JSONObject
 
 /** Foreground-service owner for the user-approved MediaProjection WebRTC session. */
 class ScreenCaptureService : Service() {
@@ -40,6 +38,9 @@ class ScreenCaptureService : Service() {
             private set
         @Volatile var screenDensityDpi = 0
             private set
+        /** Current display rotation, in Surface.ROTATION_* values. */
+        @Volatile var screenRotation = 0
+            private set
         @Volatile private var activeService: ScreenCaptureService? = null
 
         @JvmStatic
@@ -57,10 +58,16 @@ class ScreenCaptureService : Service() {
             RemoteControlService.instance?.cancelContinuousTouch()
         }
 
-        internal fun updateCapturedDimensions(width: Int, height: Int, densityDpi: Int) {
+        internal fun updateCapturedDimensions(
+            width: Int,
+            height: Int,
+            densityDpi: Int,
+            rotation: Int = screenRotation,
+        ) {
             screenWidth = width.coerceAtLeast(2)
             screenHeight = height.coerceAtLeast(2)
             screenDensityDpi = densityDpi
+            screenRotation = rotation
         }
 
         @JvmStatic
@@ -113,7 +120,7 @@ class ScreenCaptureService : Service() {
 
     private fun updateDisplayMetrics() {
         val metrics = readDisplayMetrics()
-        updateCapturedDimensions(metrics.width, metrics.height, metrics.densityDpi)
+        updateCapturedDimensions(metrics.width, metrics.height, metrics.densityDpi, metrics.rotation)
     }
 
     override fun onConfigurationChanged(newConfig: Configuration) {
@@ -135,16 +142,44 @@ class ScreenCaptureService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     private fun readDisplayMetrics(): NativeDisplayMetrics {
-        val windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            val bounds: Rect = windowManager.maximumWindowMetrics.bounds
-            NativeDisplayMetrics(bounds.width(), bounds.height(), resources.configuration.densityDpi)
-        } else {
-            @Suppress("DEPRECATION") val display = windowManager.defaultDisplay
+        // MediaProjection captures the real display, not the app window. Ask
+        // DisplayManager first so navigation bars/cutouts are included and
+        // the dimensions match the pixels delivered by ScreenCapturerAndroid.
+        val display = getSystemService(DisplayManager::class.java)
+            ?.getDisplay(Display.DEFAULT_DISPLAY)
+        if (display != null) {
             val metrics = DisplayMetrics()
             @Suppress("DEPRECATION") display.getRealMetrics(metrics)
-            NativeDisplayMetrics(metrics.widthPixels, metrics.heightPixels, metrics.densityDpi)
+            if (metrics.widthPixels > 1 && metrics.heightPixels > 1) {
+                return NativeDisplayMetrics(
+                    metrics.widthPixels,
+                    metrics.heightPixels,
+                    metrics.densityDpi,
+                    display.rotation,
+                )
+            }
         }
+
+        // Fallback for unusual OEMs that do not expose a Display instance.
+        val windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val bounds = windowManager.maximumWindowMetrics.bounds
+            return NativeDisplayMetrics(
+                bounds.width(),
+                bounds.height(),
+                resources.configuration.densityDpi,
+                display?.rotation ?: 0,
+            )
+        }
+        @Suppress("DEPRECATION") val legacyDisplay = windowManager.defaultDisplay
+        val metrics = DisplayMetrics()
+        @Suppress("DEPRECATION") legacyDisplay.getRealMetrics(metrics)
+        return NativeDisplayMetrics(
+            metrics.widthPixels,
+            metrics.heightPixels,
+            metrics.densityDpi,
+            legacyDisplay.rotation,
+        )
     }
 
     private fun createNotificationChannel() {
@@ -172,5 +207,10 @@ class ScreenCaptureService : Service() {
             .build()
     }
 
-    private data class NativeDisplayMetrics(val width: Int, val height: Int, val densityDpi: Int)
+    private data class NativeDisplayMetrics(
+        val width: Int,
+        val height: Int,
+        val densityDpi: Int,
+        val rotation: Int,
+    )
 }

@@ -7,6 +7,7 @@ import { clientsApi } from '@/services/api';
 import { DevicePageHeader, ErrorAlert, StatusBadge } from '@/components/device/shared';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { mapPointerToDevice, type DevicePoint } from '@/lib/remoteDesktop';
 import {
   onScreenStopped,
   onScreenStatus,
@@ -31,7 +32,7 @@ import {
 } from 'lucide-react';
 
 type ConnectionState = 'disconnected' | 'connecting' | 'connected';
-type GesturePoint = { x: number; y: number };
+type GesturePoint = DevicePoint;
 type ScreenInfoMessage = {
   type: 'screen-info';
   screenWidth: number;
@@ -39,41 +40,8 @@ type ScreenInfoMessage = {
   captureWidth?: number;
   captureHeight?: number;
   densityDpi?: number;
+  rotation?: number;
 };
-
-function mapPointerToDevice(
-  clientX: number,
-  clientY: number,
-  rect: DOMRect,
-  screenW: number,
-  screenH: number,
-  contentAspect: number,
-): GesturePoint | null {
-  if (!screenW || !screenH || !rect.width || !rect.height) return null;
-  const containerAspect = rect.width / rect.height;
-  let renderW: number;
-  let renderH: number;
-  let offsetX: number;
-  let offsetY: number;
-  if (containerAspect > contentAspect) {
-    renderH = rect.height;
-    renderW = renderH * contentAspect;
-    offsetX = (rect.width - renderW) / 2;
-    offsetY = 0;
-  } else {
-    renderW = rect.width;
-    renderH = renderW / contentAspect;
-    offsetX = 0;
-    offsetY = (rect.height - renderH) / 2;
-  }
-  const x = clientX - rect.left - offsetX;
-  const y = clientY - rect.top - offsetY;
-  if (x < 0 || y < 0 || x > renderW || y > renderH) return null;
-  return {
-    x: Math.max(0, Math.min(screenW - 1, Math.round((x / renderW) * screenW))),
-    y: Math.max(0, Math.min(screenH - 1, Math.round((y / renderH) * screenH))),
-  };
-}
 
 function makeSessionId(): string {
   return globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -84,6 +52,7 @@ export default function ScreenPage() {
   const [connectionState, setConnectionState] = useState<ConnectionState>('disconnected');
   const [screenWidth, setScreenWidth] = useState(0);
   const [screenHeight, setScreenHeight] = useState(0);
+  const [captureSize, setCaptureSize] = useState({ width: 0, height: 0 });
   const [videoAspect, setVideoAspect] = useState(9 / 16);
   const [fps, setFps] = useState(0);
   const [bitrateKbps, setBitrateKbps] = useState(0);
@@ -155,6 +124,7 @@ export default function ScreenPage() {
     setConnectionMode(null);
     setFps(0);
     setBitrateKbps(0);
+    setCaptureSize({ width: 0, height: 0 });
   }, [clearTimers]);
 
   const collectStats = useCallback(async () => {
@@ -206,6 +176,9 @@ export default function ScreenPage() {
       try {
         const message = JSON.parse(event.data) as ScreenInfoMessage;
         if (message.type === 'screen-info') applyScreenSize(message.screenWidth, message.screenHeight);
+        if (message.type === 'screen-info' && message.captureWidth && message.captureHeight) {
+          setCaptureSize({ width: message.captureWidth, height: message.captureHeight });
+        }
       } catch {
         // Ignore unknown device-to-panel messages.
       }
@@ -347,6 +320,9 @@ export default function ScreenPage() {
       if (payload.id !== clientId) return;
       if (payload.screenWidth && payload.screenHeight) {
         applyScreenSize(payload.screenWidth, payload.screenHeight);
+      }
+      if (payload.captureWidth && payload.captureHeight) {
+        setCaptureSize({ width: payload.captureWidth, height: payload.captureHeight });
       }
       if (payload.accessible !== undefined) setAccessible(payload.accessible);
       const terminalStates = new Set(['stopped', 'projection-stopped', 'closed']);
@@ -549,6 +525,10 @@ export default function ScreenPage() {
         {connected && <StatusBadge label={`${fps} FPS`} status="neutral" />}
         {connected && <StatusBadge label={`${bitrateKbps} kbps`} status="neutral" />}
         {connected && <StatusBadge label={resolutionLabel} status="neutral" />}
+        {connected && captureSize.width > 0 && captureSize.height > 0 &&
+          (captureSize.width !== screenWidth || captureSize.height !== screenHeight) && (
+            <StatusBadge label={`capture ${captureSize.width}×${captureSize.height}`} status="neutral" />
+          )}
         {connected && <StatusBadge label={controlReady ? 'DataChannel ready' : 'Control fallback'} status={controlReady ? 'success' : 'warning'} />}
       </div>
 
@@ -599,20 +579,20 @@ export default function ScreenPage() {
         </div>
 
         <aside className="flex items-center justify-center gap-2 rounded-2xl border bg-card p-2 lg:flex-col">
-          <Button size="icon" variant="outline" title="Volume down" disabled={!connected} onClick={() => sendControl('volume', { direction: 'down' })}>
+          <Button size="icon" variant="outline" title="Volume down" aria-label="Volume down" disabled={!connected} onClick={() => sendControl('volume', { direction: 'down' })}>
             <Volume1 className="h-4 w-4" />
           </Button>
-          <Button size="icon" variant="outline" title="Volume up" disabled={!connected} onClick={() => sendControl('volume', { direction: 'up' })}>
+          <Button size="icon" variant="outline" title="Volume up" aria-label="Volume up" disabled={!connected} onClick={() => sendControl('volume', { direction: 'up' })}>
             <Volume2 className="h-4 w-4" />
           </Button>
           <div className="hidden h-px w-10 bg-border lg:block" />
-          <Button size="icon" variant="outline" title="Back" disabled={!connected} onClick={() => sendControl('key', { keyCode: 'back' })}>
+          <Button size="icon" variant="outline" title="Back" aria-label="Back" disabled={!connected} onClick={() => sendControl('key', { keyCode: 'back' })}>
             <ArrowLeft className="h-4 w-4" />
           </Button>
-          <Button size="icon" variant="outline" title="Home" disabled={!connected} onClick={() => sendControl('key', { keyCode: 'home' })}>
+          <Button size="icon" variant="outline" title="Home" aria-label="Home" disabled={!connected} onClick={() => sendControl('key', { keyCode: 'home' })}>
             <Home className="h-4 w-4" />
           </Button>
-          <Button size="icon" variant="outline" title="Recent apps" disabled={!connected} onClick={() => sendControl('key', { keyCode: 'recents' })}>
+          <Button size="icon" variant="outline" title="Recent apps" aria-label="Recent apps" disabled={!connected} onClick={() => sendControl('key', { keyCode: 'recents' })}>
             <LayoutGrid className="h-4 w-4" />
           </Button>
         </aside>

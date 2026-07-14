@@ -27,7 +27,6 @@ export const defaultConfig: ServerConfig = {
     sessionTimeout: 86400000,
     loginAttempts: 5,
     loginLockout: 900000,
-    deviceSecret: process.env.DEVICE_SECRET || '',
   },
   logger: {
     maxDbLogs: 10000,

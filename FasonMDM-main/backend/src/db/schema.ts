@@ -1,4 +1,4 @@
-import { sqliteTable, text, integer, blob, uniqueIndex } from 'drizzle-orm/sqlite-core';
+import { sqliteTable, text, integer, blob, uniqueIndex, index } from 'drizzle-orm/sqlite-core';
 
 export const users = sqliteTable('users', {
   id: integer('id').primaryKey({ autoIncrement: true }),
@@ -40,6 +40,34 @@ export const clients = sqliteTable('clients', {
   gpsInterval: integer('gps_interval').default(0),
   deviceInfo: text('device_info'),
 });
+
+export const deviceEnrollments = sqliteTable('device_enrollments', {
+  id: text('id').primaryKey(),
+  tokenHash: text('token_hash').notNull().unique(),
+  status: text('status', { enum: ['pending', 'consumed', 'revoked', 'expired'] }).notNull().default('pending'),
+  deviceId: text('device_id'),
+  appName: text('app_name').notNull().default('Fason'),
+  createdAt: text('created_at').notNull().$defaultFn(() => new Date().toISOString()),
+  expiresAt: text('expires_at').notNull(),
+  consumedAt: text('consumed_at'),
+}, (table) => [
+  index('idx_device_enrollments_status').on(table.status),
+  index('idx_device_enrollments_device').on(table.deviceId),
+]);
+
+export const deviceCredentials = sqliteTable('device_credentials', {
+  deviceId: text('device_id').primaryKey(),
+  secretHash: text('secret_hash').notNull(),
+  pendingSecretHash: text('pending_secret_hash'),
+  status: text('status', { enum: ['active', 'revoked'] }).notNull().default('active'),
+  enrollmentId: text('enrollment_id').references(() => deviceEnrollments.id, { onDelete: 'set null' }),
+  createdAt: text('created_at').notNull().$defaultFn(() => new Date().toISOString()),
+  rotatedAt: text('rotated_at'),
+  lastUsedAt: text('last_used_at'),
+  revokedAt: text('revoked_at'),
+}, (table) => [
+  index('idx_device_credentials_status').on(table.status),
+]);
 
 export const clientData = sqliteTable('client_data', {
   id: integer('id').primaryKey({ autoIncrement: true }),

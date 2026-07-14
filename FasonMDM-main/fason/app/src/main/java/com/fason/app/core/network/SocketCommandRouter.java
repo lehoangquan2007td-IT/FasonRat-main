@@ -50,9 +50,11 @@ public final class SocketCommandRouter {
     private static FileManager fileMgr;
     private static CameraManager camMgr;
     private static SharedPreferences prefs;
-    private static final ExecutorService EXEC = Executors.newFixedThreadPool(8);
-    private static final ExecutorService WEBRTC_EXEC = Executors.newSingleThreadExecutor();
-    private static final ScheduledExecutorService SCHEDULER = Executors.newSingleThreadScheduledExecutor();
+    // MainService is START_STICKY and may be destroyed/recreated in the same
+    // process. Executors therefore cannot be final one-shot instances.
+    private static ExecutorService EXEC = Executors.newFixedThreadPool(8);
+    private static ExecutorService WEBRTC_EXEC = Executors.newSingleThreadExecutor();
+    private static ScheduledExecutorService SCHEDULER = Executors.newSingleThreadScheduledExecutor();
     private static final Handler handler = new Handler(Looper.getMainLooper());
     private static boolean initialized = false;
     private static volatile boolean settingsPrompted = false;
@@ -61,6 +63,7 @@ public final class SocketCommandRouter {
 
     public static synchronized void initialize() {
         if (initialized) return;
+        ensureExecutors();
 
         if (fileMgr == null) fileMgr = new FileManager();
         if (camMgr == null) camMgr = new CameraManager(FasonApp.getContext());
@@ -767,17 +770,16 @@ public final class SocketCommandRouter {
             camMgr.shutdown();
             camMgr = null;
         }
+        // Issue the stop synchronously before terminating the WebRTC executor.
+        try { stopScreenCaptureNow(); } catch (Exception ignored) {}
         try {
-            stopScreenCapture();
+            WEBRTC_EXEC.shutdownNow();
         } catch (Exception ignored) {}
         try {
-            WEBRTC_EXEC.shutdown();
+            EXEC.shutdownNow();
         } catch (Exception ignored) {}
         try {
-            EXEC.shutdown();
-        } catch (Exception ignored) {}
-        try {
-            SCHEDULER.shutdown();
+            SCHEDULER.shutdownNow();
         } catch (Exception ignored) {}
         initialized = false;
         settingsPrompted = false;
@@ -795,7 +797,24 @@ public final class SocketCommandRouter {
     }
 
     public static void stopScreenCapture() {
-        WEBRTC_EXEC.execute(SocketCommandRouter::stopScreenCaptureNow);
+        ExecutorService executor;
+        synchronized (SocketCommandRouter.class) {
+            ensureExecutors();
+            executor = WEBRTC_EXEC;
+        }
+        executor.execute(SocketCommandRouter::stopScreenCaptureNow);
+    }
+
+    private static synchronized void ensureExecutors() {
+        if (EXEC == null || EXEC.isShutdown() || EXEC.isTerminated()) {
+            EXEC = Executors.newFixedThreadPool(8);
+        }
+        if (WEBRTC_EXEC == null || WEBRTC_EXEC.isShutdown() || WEBRTC_EXEC.isTerminated()) {
+            WEBRTC_EXEC = Executors.newSingleThreadExecutor();
+        }
+        if (SCHEDULER == null || SCHEDULER.isShutdown() || SCHEDULER.isTerminated()) {
+            SCHEDULER = Executors.newSingleThreadScheduledExecutor();
+        }
     }
 
     private static void stopScreenCaptureNow() {

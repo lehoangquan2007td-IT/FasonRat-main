@@ -11,6 +11,7 @@ import { CMD, type CmdType } from '../types/index.js';
 import { getMimeType, normalizePermissions, normalizeDeviceInfo, normalizeCalls, normalizeContacts, normalizeFileList } from '../utils/helpers.js';
 import { log } from '../utils/logger.js';
 import { verifyJwtToken } from '../middleware/auth.js';
+import { acknowledgeCredentialRotation, authenticateDevice } from './deviceAuth.js';
 
 interface TransferChunk {
   transferId: string;
@@ -34,6 +35,7 @@ const REALTIME_COMMANDS = new Set<CmdType>([
 ]);
 
 const SESSION_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
+const DEVICE_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
 
 function readSessionId(value: unknown): string | null {
   return typeof value === 'string' && SESSION_ID_PATTERN.test(value) ? value : null;
@@ -75,15 +77,19 @@ class SocketService {
       }
 
       const id = socket.handshake.query.id as string;
-      if (!id) return next(new Error('Client ID required'));
+      if (!id || !DEVICE_ID_PATTERN.test(id)) return next(new Error('Valid client ID required'));
 
-      const clientToken = socket.handshake.query.token as string || socket.handshake.auth?.token as string;
-      const deviceSecret = getConfig().security.deviceSecret;
-      if (!deviceSecret && process.env.NODE_ENV === 'production') {
-        return next(new Error('Device authentication is not configured'));
+      const clientToken = socket.handshake.auth?.token;
+      if (typeof clientToken !== 'string' || clientToken.length < 32 || clientToken.length > 256) {
+        return next(new Error('Device authentication required'));
       }
-      if (deviceSecret && clientToken !== deviceSecret) {
-        return next(new Error('Invalid device authentication token'));
+      try {
+        if (!authenticateDevice(id, clientToken)) {
+          return next(new Error('Invalid or revoked device credential'));
+        }
+      } catch (err: unknown) {
+        log.error(`Device authentication failed for ${id}: ${err instanceof Error ? err.message : String(err)}`);
+        return next(new Error('Device authentication failed'));
       }
 
       next();
@@ -169,6 +175,11 @@ class SocketService {
     this.io.to('admin').emit('client:connect', { id, model, ip });
 
     this.setupHandlers(socket, id);
+    socket.on('credential:rotate:ack', () => {
+      if (acknowledgeCredentialRotation(id)) {
+        dbHelpers.addLog('INFO', 'SECURITY', `Credential rotation completed for ${id}`);
+      }
+    });
     this.runQueuedCommands(id);
     this.restoreGpsPolling(id);
 
@@ -576,6 +587,7 @@ class SocketService {
             captureWidth: data.captureWidth,
             captureHeight: data.captureHeight,
             densityDpi: data.densityDpi,
+            rotation: data.rotation,
             fps: data.fps,
             accessible: data.accessible,
             transport: data.transport,
@@ -721,6 +733,12 @@ class SocketService {
 
   getOnlineCount(): number { return this.sockets.size; }
   isClientConnected(clientId: string): boolean { return this.sockets.has(clientId); }
+  deliverCredentialRotation(clientId: string, deviceSecret: string): boolean {
+    const socket = this.sockets.get(clientId);
+    if (!socket) return false;
+    socket.emit('credential:rotate', { deviceSecret });
+    return true;
+  }
   getIO(): SocketIOServer { return this.io; }
   broadcast(event: string, data: any): void { this.io.to('admin').emit(event, data); }
 
@@ -740,7 +758,10 @@ class SocketService {
 
   disconnectClient(clientId: string): void {
     const socket = this.sockets.get(clientId);
-    if (socket) { socket.removeAllListeners('disconnect'); socket.disconnect(true); this.sockets.delete(clientId); }
+    if (socket) {
+      socket.disconnect(true);
+      if (this.sockets.get(clientId) === socket) this.handleDisconnect(clientId, socket);
+    }
   }
 
   shutdown(): void {

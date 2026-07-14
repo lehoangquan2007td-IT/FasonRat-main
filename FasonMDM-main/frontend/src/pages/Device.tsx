@@ -1,23 +1,24 @@
 import { useEffect, useState, useCallback } from 'react';
-import { useParams, useNavigate, NavLink, Outlet, useLocation } from 'react-router-dom';
+import { useParams, useNavigate, NavLink, Outlet } from 'react-router-dom';
 import { clientsApi } from '@/services/api';
 import type { ClientDevice, DeviceOutletContext } from '@/types';
 import { useAuthStore } from '@/store/auth';
 import { getDeviceTabs } from '@/config/navigation';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { Smartphone, RefreshCw, Trash2, AlertCircle } from 'lucide-react';
+import { Smartphone, RefreshCw, Trash2, AlertCircle, KeyRound, ShieldX, Loader2 } from 'lucide-react';
 import { cn, getCountryFlag } from '@/lib/utils';
 
 export default function DevicePage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const location = useLocation();
   const { hasPermission } = useAuthStore();
   const deviceTabs = getDeviceTabs(hasPermission);
   const [client, setClient] = useState<ClientDevice | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [credentialAction, setCredentialAction] = useState<'rotate' | 'revoke' | null>(null);
+  const [credentialError, setCredentialError] = useState<string | null>(null);
 
   const loadClient = useCallback(async () => {
     if (!id) return;
@@ -37,6 +38,7 @@ export default function DevicePage() {
   }, [id]);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- initial route data load
     loadClient();
   }, [loadClient]);
 
@@ -57,7 +59,38 @@ export default function DevicePage() {
     setShowDeleteConfirm(false);
   };
 
-  const currentTab = deviceTabs.find(tab => location.pathname.endsWith(`/${tab.to}`));
+  const getApiError = (err: unknown, fallback: string) => {
+    const responseError = (err as { response?: { data?: { error?: string } } })?.response?.data?.error;
+    return responseError || fallback;
+  };
+
+  const handleRotateCredential = async () => {
+    if (!id || !window.confirm('Rotate this device credential now? The device must remain online while the new credential is delivered.')) return;
+    setCredentialAction('rotate');
+    setCredentialError(null);
+    try {
+      await clientsApi.rotateCredential(id);
+      await loadClient();
+    } catch (err: unknown) {
+      setCredentialError(getApiError(err, 'Failed to rotate device credential.'));
+    } finally {
+      setCredentialAction(null);
+    }
+  };
+
+  const handleRevokeCredential = async () => {
+    if (!id || !window.confirm('Revoke this device credential? The device will be disconnected and cannot reconnect with its current APK.')) return;
+    setCredentialAction('revoke');
+    setCredentialError(null);
+    try {
+      await clientsApi.revokeCredential(id);
+      await loadClient();
+    } catch (err: unknown) {
+      setCredentialError(getApiError(err, 'Failed to revoke device credential.'));
+    } finally {
+      setCredentialAction(null);
+    }
+  };
 
   if (loading && !client) {
     return (
@@ -120,6 +153,16 @@ export default function DevicePage() {
               </div>
             </div>
             <div className="flex items-center gap-1 shrink-0">
+              {hasPermission('device:command') && client?.online && (
+                <Button variant="ghost" size="icon" onClick={handleRotateCredential} disabled={credentialAction !== null} className="h-8 w-8" aria-label="Rotate device credential" title="Rotate device credential">
+                  {credentialAction === 'rotate' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <KeyRound className="h-3.5 w-3.5" />}
+                </Button>
+              )}
+              {hasPermission('device:delete') && (
+                <Button variant="ghost" size="icon" onClick={handleRevokeCredential} disabled={credentialAction !== null} className="h-8 w-8 text-muted-foreground hover:text-destructive" aria-label="Revoke device credential" title="Revoke device credential">
+                  {credentialAction === 'revoke' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ShieldX className="h-3.5 w-3.5" />}
+                </Button>
+              )}
               <Button variant="ghost" size="icon" onClick={loadClient} disabled={loading} className="h-8 w-8" aria-label="Refresh device">
                 <RefreshCw className={`h-3.5 w-3.5 ${loading ? 'animate-spin' : ''}`} />
               </Button>
@@ -188,6 +231,13 @@ export default function DevicePage() {
           </div>
         </div>
       </div>
+
+      {credentialError && (
+        <div className="mx-4 md:mx-6 lg:mx-8 mt-2 p-2.5 rounded-lg bg-destructive/10 border border-destructive/20 text-destructive text-xs flex items-center gap-2">
+          <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+          <span>{credentialError}</span>
+        </div>
+      )}
 
       {!client?.online && (
         <div className="mx-4 md:mx-6 lg:mx-8 mt-2 p-2.5 rounded-lg bg-warning/10 border border-warning/20 text-warning text-xs flex items-center gap-2">

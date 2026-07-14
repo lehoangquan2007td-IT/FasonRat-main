@@ -80,9 +80,19 @@ class RemoteControlService : AccessibilityService() {
     fun beginContinuousTouch(x: Float, y: Float) {
         mainHandler.post {
             resetContinuousTouch()
-            val point = PointF(x, y)
-            val path = Path().apply { moveTo(x, y) }
-            val stroke = GestureDescription.StrokeDescription(path, 0, 1, true)
+            val maxX = (ScreenCaptureService.screenWidth - 1).coerceAtLeast(0).toFloat()
+            val maxY = (ScreenCaptureService.screenHeight - 1).coerceAtLeast(0).toFloat()
+            val endX = (x + 0.1f).coerceAtMost(maxX)
+            val endY = (y + 0.1f).coerceAtMost(maxY)
+            val point = PointF(endX, endY)
+            // A zero-length path is rejected by a few OEM accessibility
+            // implementations. Add a sub-pixel segment while keeping the
+            // pointer visually at the requested coordinate.
+            val path = Path().apply {
+                moveTo(x.coerceIn(0f, maxX), y.coerceIn(0f, maxY))
+                lineTo(endX, endY)
+            }
+            val stroke = GestureDescription.StrokeDescription(path, 0, 16, true)
             continuedPoint = point
             continuousDispatching = true
             dispatchContinuousStroke(stroke, point, false)

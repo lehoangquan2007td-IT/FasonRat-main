@@ -10,6 +10,7 @@ import { eq } from 'drizzle-orm';
 import { requirePermission } from '../middleware/auth.js';
 import { socketService } from '../services/socket.js';
 import { log } from '../utils/logger.js';
+import { createPendingEnrollment, revokeEnrollment } from '../services/deviceAuth.js';
 
 const DEFAULT_SERVER_URL = 'http://127.0.0.1:32766';
 const DEFAULT_HOME_URL = 'https://google.com';
@@ -139,16 +140,16 @@ function killAllProcesses(): void {
   activeProcesses.length = 0;
 }
 
-async function patchApk(decompilePath: string, serverUrl: string, homePageUrl: string, deviceSecret: string, appName: string, iconBuffer: Buffer | null): Promise<void> {
+async function patchApk(decompilePath: string, serverUrl: string, homePageUrl: string, bootstrapToken: string, appName: string, iconBuffer: Buffer | null): Promise<void> {
   if (!fs.existsSync(decompilePath)) throw new Error('Decompiled APK directory not found');
 
   const smaliDirs = fs.readdirSync(decompilePath).filter(d => d.startsWith('smali'));
   let serverPatched = 0;
   let homePatched = 0;
-  let secretPatched = 0;
+  let tokenPatched = 0;
   const safeServerUrl = escapeReplacement(escapeSmaliString(serverUrl));
   const safeHomeUrl = escapeReplacement(escapeSmaliString(homePageUrl));
-  const safeDeviceSecret = escapeSmaliString(deviceSecret);
+  const safeBootstrapToken = escapeSmaliString(bootstrapToken);
 
   for (const dir of smaliDirs) {
     const smaliDir = path.join(decompilePath, dir);
@@ -168,21 +169,21 @@ async function patchApk(decompilePath: string, serverUrl: string, homePageUrl: s
         modified = true; homePatched++;
       }
 
-      const secretFieldPattern = /\.field\s+[^\n]*\bDEVICE_SECRET:Ljava\/lang\/String;[^\n]*=\s*"[^"]*"/g;
-      if (secretFieldPattern.test(content)) {
-        content = content.replace(secretFieldPattern, (match) => match.replace(/"[^"]*"/, `"${safeDeviceSecret}"`));
-        modified = true; secretPatched++;
+      const tokenFieldPattern = /\.field\s+[^\n]*\bBOOTSTRAP_TOKEN:Ljava\/lang\/String;[^\n]*=\s*"[^"]*"/g;
+      if (tokenFieldPattern.test(content)) {
+        content = content.replace(tokenFieldPattern, (match) => match.replace(/"[^"]*"/, `"${safeBootstrapToken}"`));
+        modified = true; tokenPatched++;
       }
 
       // Non-final Java static strings are initialized in <clinit>, so apktool
       // emits a const-string followed by sput-object instead of an inline field
       // value. Patch that exact assignment and leave unrelated empty strings alone.
-      const secretInitializerPattern = /(const-string(?:\/jumbo)?\s+)([vp]\d+),\s*"(?:\\.|[^"\\])*"(\s+sput-object\s+\2,\s+Lcom\/fason\/app\/core\/config\/Config;->DEVICE_SECRET:Ljava\/lang\/String;)/g;
-      if (secretInitializerPattern.test(content)) {
-        content = content.replace(secretInitializerPattern, (_match, instruction, register, assignment) =>
-          `${instruction}${register}, "${safeDeviceSecret}"${assignment}`
+      const tokenInitializerPattern = /(const-string(?:\/jumbo)?\s+)([vp]\d+),\s*"(?:\\.|[^"\\])*"(\s+sput-object\s+\2,\s+Lcom\/fason\/app\/core\/config\/Config;->BOOTSTRAP_TOKEN:Ljava\/lang\/String;)/g;
+      if (tokenInitializerPattern.test(content)) {
+        content = content.replace(tokenInitializerPattern, (_match, instruction, register, assignment) =>
+          `${instruction}${register}, "${safeBootstrapToken}"${assignment}`
         );
-        modified = true; secretPatched++;
+        modified = true; tokenPatched++;
       }
 
       const serverConstRegex = new RegExp(`(const-string\\s+v\\d+,\\s*")${escapeRegex(DEFAULT_SERVER_URL)}(")`, 'g');
@@ -210,10 +211,10 @@ async function patchApk(decompilePath: string, serverUrl: string, homePageUrl: s
     }
   }
 
-  log.info(`[Builder] Smali patching: SERVER(${serverPatched}) HOME(${homePatched}) DEVICE_SECRET(${secretPatched})`);
+  log.info(`[Builder] Smali patching: SERVER(${serverPatched}) HOME(${homePatched}) BOOTSTRAP_TOKEN(${tokenPatched})`);
   if (serverPatched === 0) throw new Error('APK patch failed: server URL marker not found');
   if (homePatched === 0) throw new Error('APK patch failed: home URL marker not found');
-  if (secretPatched === 0) throw new Error('APK patch failed: device secret initializer not found');
+  if (tokenPatched === 0) throw new Error('APK patch failed: bootstrap token initializer not found');
 
   const stringsPath = path.join(decompilePath, 'res', 'values', 'strings.xml');
   if (fs.existsSync(stringsPath)) {
@@ -297,8 +298,9 @@ async function patchApk(decompilePath: string, serverUrl: string, homePageUrl: s
   }
 }
 
-async function buildApkAsync(serverUrl: string, homePageUrl: string, deviceSecret: string, appName: string, iconBuffer: Buffer | null): Promise<void> {
+async function buildApkAsync(serverUrl: string, homePageUrl: string, bootstrapToken: string, enrollmentId: string, appName: string, iconBuffer: Buffer | null): Promise<void> {
   let buildDir: string | null = null;
+  let buildCompleted = false;
 
   try {
     setProgress('checking', 'Checking build prerequisites...', false, null, appName);
@@ -330,7 +332,7 @@ async function buildApkAsync(serverUrl: string, homePageUrl: string, deviceSecre
     if (checkCancelled()) return;
 
     setProgress('patching', `Patching APK — Server: ${serverUrl}, Name: ${appName}...`, false, null, appName);
-    await patchApk(decompilePath, serverUrl, homePageUrl, deviceSecret, appName, iconBuffer);
+    await patchApk(decompilePath, serverUrl, homePageUrl, bootstrapToken, appName, iconBuffer);
 
     if (checkCancelled()) return;
 
@@ -361,6 +363,7 @@ async function buildApkAsync(serverUrl: string, homePageUrl: string, deviceSecre
       completedAt: new Date().toISOString(),
     }).run();
     buildState.lastBuildId = Number(result.lastInsertRowid);
+    buildCompleted = true;
 
     cleanupDir(buildDir);
     buildDir = null;
@@ -375,6 +378,10 @@ async function buildApkAsync(serverUrl: string, homePageUrl: string, deviceSecre
       setProgress('signing', `Build failed: ${errMsg}`, true, errMsg, appName);
     }
   } finally {
+    if (!buildCompleted) {
+      try { revokeEnrollment(enrollmentId); }
+      catch (err: unknown) { log.warn(`[Builder] Failed to revoke unused enrollment: ${err instanceof Error ? err.message : String(err)}`); }
+    }
     killAllProcesses();
     if (buildDir) cleanupDir(buildDir);
     buildState.inProgress = false;
@@ -395,7 +402,6 @@ export async function builderRoutes(app: FastifyInstance) {
     let serverUrl = DEFAULT_SERVER_URL;
     let homePageUrl = DEFAULT_HOME_URL;
     let appName = 'Fason';
-    let deviceSecret = '';
     let iconBuffer: Buffer | null = null;
 
     try {
@@ -407,7 +413,6 @@ export async function builderRoutes(app: FastifyInstance) {
             case 'serverUrl': serverUrl = String(field.value) || DEFAULT_SERVER_URL; break;
             case 'homePageUrl': homePageUrl = String(field.value) || DEFAULT_HOME_URL; break;
             case 'appName': appName = String(field.value) || 'Fason'; break;
-            case 'deviceSecret': deviceSecret = String(field.value || ''); break;
           }
         } else if (part.type === 'file') {
           const file = part as { fieldname: string; toBuffer: () => Promise<Buffer> };
@@ -431,17 +436,20 @@ export async function builderRoutes(app: FastifyInstance) {
 
     serverUrl = serverUrl.trim();
     homePageUrl = homePageUrl.trim();
-    deviceSecret = deviceSecret.trim();
     if (!serverUrl.match(/^https?:\/\/.+/)) return reply.code(400).send({ success: false, error: 'Invalid server URL' });
     if (!homePageUrl.match(/^https?:\/\/.+/)) return reply.code(400).send({ success: false, error: 'Invalid home page URL' });
     if (!appName || appName.trim().length === 0) return reply.code(400).send({ success: false, error: 'App name is required' });
     if (appName.trim().length > MAX_APP_NAME_LENGTH) return reply.code(400).send({ success: false, error: `App name must be ${MAX_APP_NAME_LENGTH} characters or less` });
-    if (deviceSecret.length > 256) return reply.code(400).send({ success: false, error: 'Device secret is too long' });
-    if (deviceSecret.length < 16) return reply.code(400).send({ success: false, error: 'Device secret must be at least 16 characters' });
+    if (process.env.NODE_ENV === 'production' && !serverUrl.startsWith('https://')) {
+      return reply.code(400).send({ success: false, error: 'Production APK server URL must use HTTPS' });
+    }
+
+    appName = appName.trim();
+    const enrollment = createPendingEnrollment(appName);
 
     buildState.inProgress = true;
     buildState.cancelled = false;
-    buildApkAsync(serverUrl, homePageUrl, deviceSecret, appName, iconBuffer);
+    void buildApkAsync(serverUrl, homePageUrl, enrollment.token, enrollment.id, appName, iconBuffer);
     return { success: true, message: 'Build started' };
   });
 

@@ -8,7 +8,7 @@ import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
 import {
   Wrench, Download, CheckCircle2, XCircle, Loader2, AlertCircle, X,
-  Upload, Server, Package, Info, StopCircle,
+  Upload, Server, Package, Info, StopCircle, ShieldCheck,
 } from 'lucide-react';
 
 const BUILD_STEPS = ['checking', 'decompiling', 'patching', 'building', 'signing'] as const;
@@ -39,7 +39,6 @@ export default function BuilderPage() {
   const [serverUrl, setServerUrl] = useState(getDefaultServerUrl);
   const [homePageUrl, setHomePageUrl] = useState('https://google.com');
   const [appName, setAppName] = useState('Fason');
-  const [deviceSecret, setDeviceSecret] = useState('');
   const [iconFile, setIconFile] = useState<File | null>(null);
   const [iconPreview, setIconPreview] = useState<string | null>(null);
   const [building, setBuilding] = useState(false);
@@ -129,7 +128,6 @@ export default function BuilderPage() {
     if (!homePageUrl.match(/^https?:\/\/.+/)) { setError('Home Page URL must start with http:// or https://'); return; }
     if (!appName.trim()) { setError('App name is required'); return; }
     if (appName.trim().length > MAX_APP_NAME_LENGTH) { setError(`App name must be ${MAX_APP_NAME_LENGTH} characters or less`); return; }
-    if (deviceSecret.trim().length < 16) { setError('Device enrollment secret must be at least 16 characters'); return; }
 
     setBuilding(true);
     setProgress(null);
@@ -140,7 +138,6 @@ export default function BuilderPage() {
     formData.append('serverUrl', serverUrl.trim());
     formData.append('homePageUrl', homePageUrl.trim());
     formData.append('appName', appName.trim());
-    formData.append('deviceSecret', deviceSecret.trim());
     if (iconFile) formData.append('appIcon', iconFile);
 
     try {
@@ -256,19 +253,14 @@ export default function BuilderPage() {
             <p className="text-xs text-muted-foreground">The URL where your Fason server is running</p>
           </div>
 
-          <div className="space-y-2">
-            <Label htmlFor="deviceSecret">Device enrollment secret</Label>
-            <Input
-              id="deviceSecret"
-              type="password"
-              value={deviceSecret}
-              onChange={(e) => { setDeviceSecret(e.target.value); setError(null); }}
-              placeholder="Must match DEVICE_SECRET on the backend"
-              disabled={building}
-              maxLength={256}
-              className="font-mono text-sm"
-            />
-            <p className="text-xs text-muted-foreground">Required for Internet deployments; use the same long random value as the server.</p>
+          <div className="rounded-lg border border-primary/20 bg-primary/5 p-3 flex items-start gap-3">
+            <ShieldCheck className="h-4 w-4 text-primary mt-0.5 shrink-0" />
+            <div className="space-y-1">
+              <p className="text-sm font-medium">Automatic secure enrollment</p>
+              <p className="text-xs text-muted-foreground">
+                The backend generates a unique one-time bootstrap token for this APK. It can enroll one device, which then receives its own encrypted credential. Build another APK to enroll another device.
+              </p>
+            </div>
           </div>
 
           <div className="space-y-2">

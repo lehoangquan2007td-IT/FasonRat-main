@@ -126,6 +126,22 @@ export const CMD = {
 
 export type CmdType = typeof CMD[keyof typeof CMD];
 
+/** Actions accepted by the WebRTC control data channel and its REST fallback. */
+export const SCREEN_ACTION = {
+  STATUS: 'status',
+  TAP: 'tap',
+  SWIPE: 'swipe',
+  GESTURE: 'gesture',
+  TOUCH_START: 'touchStart',
+  TOUCH_MOVE: 'touchMove',
+  TOUCH_END: 'touchEnd',
+  KEY: 'key',
+  TEXT: 'text',
+  VOLUME: 'volume',
+} as const;
+
+export type ScreenAction = typeof SCREEN_ACTION[keyof typeof SCREEN_ACTION];
+
 export interface CommandPayload {
   type: CmdType;
   action?: string;
@@ -171,7 +187,6 @@ export interface ServerConfig {
     sessionTimeout: number;
     loginAttempts: number;
     loginLockout: number;
-    deviceSecret: string;
   };
   logger: {
     maxDbLogs: number;

@@ -151,6 +151,30 @@ export function initDb(): DB {
       secret TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS device_enrollments (
+      id TEXT PRIMARY KEY,
+      token_hash TEXT UNIQUE NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'consumed', 'revoked', 'expired')),
+      device_id TEXT,
+      app_name TEXT NOT NULL DEFAULT 'Fason',
+      created_at TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      consumed_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS device_credentials (
+      device_id TEXT PRIMARY KEY,
+      secret_hash TEXT NOT NULL,
+      pending_secret_hash TEXT,
+      status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'revoked')),
+      enrollment_id TEXT,
+      created_at TEXT NOT NULL,
+      rotated_at TEXT,
+      last_used_at TEXT,
+      revoked_at TEXT,
+      FOREIGN KEY (enrollment_id) REFERENCES device_enrollments(id) ON DELETE SET NULL
+    );
+
     CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token);
     CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
     CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at);
@@ -164,6 +188,9 @@ export function initDb(): DB {
     CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
     CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
     CREATE INDEX IF NOT EXISTS idx_login_attempts_ip ON login_attempts(ip);
+    CREATE INDEX IF NOT EXISTS idx_device_enrollments_status ON device_enrollments(status);
+    CREATE INDEX IF NOT EXISTS idx_device_enrollments_device ON device_enrollments(device_id);
+    CREATE INDEX IF NOT EXISTS idx_device_credentials_status ON device_credentials(status);
   `);
 
   // Migrate: client_files schema change (file_path/stored_name → data blob)
