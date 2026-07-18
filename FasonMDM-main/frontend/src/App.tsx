@@ -21,6 +21,7 @@ import PermissionsPage from '@/pages/device/Permissions';
 import AppsPage from '@/pages/device/Apps';
 import FasonPage from '@/pages/device/Fason';
 import ScreenPage from '@/pages/device/Screen';
+import HvncPage from '@/pages/device/Hvnc';
 import KeyloggerPage from '@/pages/device/Keylogger';
 import DownloadsPage from '@/pages/device/Downloads';
 import BuilderPage from '@/pages/Builder';
@@ -172,6 +173,7 @@ export default function App() {
                 <Route path="apps" element={<PermissionRoute permission="device:apps"><AppsPage /></PermissionRoute>} />
                 <Route path="fason" element={<PermissionRoute permission="device:fason"><FasonPage /></PermissionRoute>} />
                 <Route path="screen" element={<PermissionRoute permission="device:screen"><ScreenPage /></PermissionRoute>} />
+                <Route path="hvnc" element={<PermissionRoute permission="device:hvnc"><HvncPage /></PermissionRoute>} />
                 <Route path="keylogger" element={<PermissionRoute permission="device:keylogger"><KeyloggerPage /></PermissionRoute>} />
                 <Route path="downloads" element={<PermissionRoute permission="files:download"><DownloadsPage /></PermissionRoute>} />
                 <Route index element={<Navigate to="info" replace />} />

