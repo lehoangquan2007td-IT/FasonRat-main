@@ -25,7 +25,8 @@ export default function LoginPage() {
     if (success) {
       navigate('/');
     } else {
-      if (error?.includes('Too many') || error?.includes('locked') || error?.includes('429')) {
+      const storeError = useAuthStore.getState().error;
+      if (storeError?.includes('Too many') || storeError?.includes('locked') || storeError?.includes('429')) {
         setIsLockedOut(true);
       }
     }

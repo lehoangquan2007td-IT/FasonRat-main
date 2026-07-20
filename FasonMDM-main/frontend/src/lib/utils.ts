@@ -1,6 +1,11 @@
 import { clsx, type ClassValue } from "clsx"
 import { twMerge } from "tailwind-merge"
 
+/** Sanitize a URL path segment by stripping dangerous characters */
+export function sanitizePath(segment: string | number): string {
+  return String(segment).replace(/[^a-zA-Z0-9._-]/g, '');
+}
+
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
 }

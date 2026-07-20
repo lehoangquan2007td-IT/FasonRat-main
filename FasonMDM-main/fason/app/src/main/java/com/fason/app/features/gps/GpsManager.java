@@ -224,6 +224,7 @@ public class GpsManager {
 
         // 2. Try Native (runs in parallel as fallback)
         if (locMgr != null) {
+            removeNativeListener(); // Remove any previous listener to avoid leak
             nativeListener = new LocationListener() {
                 @Override
                 public void onLocationChanged(@NonNull Location loc) {

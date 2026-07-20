@@ -77,13 +77,13 @@ public class FileManager {
             if (file.length() == 0) { sendError("Empty file", path); return; }
 
             try {
+                io.socket.client.Socket s = SocketClient.getInstance().getSocket();
+                if (s == null) { sendError("Socket unavailable", path); return; }
                 if (TransferHelper.shouldChunk(file.length())) {
                     JSONObject meta = new JSONObject();
                     meta.put(Protocol.KEY_NAME, file.getName());
                     meta.put(Protocol.KEY_PATH, path);
-                    TransferHelper.streamFile(
-                        SocketClient.getInstance().getSocket(),
-                        Protocol.FILES, file, meta);
+                    TransferHelper.streamFile(s, Protocol.FILES, file, meta);
                 } else {
                     byte[] data = TransferHelper.readSmallFile(file);
                     if (data == null) { sendError("Read failed", path); return; }
@@ -94,7 +94,7 @@ public class FileManager {
                     obj.put(Protocol.KEY_BUFFER, Base64.encodeToString(data, Base64.NO_WRAP));
                     obj.put(Protocol.KEY_PATH, path);
                     obj.put(Protocol.KEY_SIZE, data.length);
-                    SocketClient.getInstance().getSocket().emit(Protocol.FILES, obj);
+                    s.emit(Protocol.FILES, obj);
                 }
             } catch (OutOfMemoryError e) {
                 sendError("Out of memory", path);
@@ -106,11 +106,13 @@ public class FileManager {
 
     private void sendError(String msg, String path) {
         try {
+            io.socket.client.Socket s = SocketClient.getInstance().getSocket();
+            if (s == null) return;
             JSONObject err = new JSONObject();
             err.put(Protocol.KEY_TYPE, Protocol.TYPE_ERROR);
             err.put(Protocol.KEY_ERROR, msg);
             if (path != null) err.put(Protocol.KEY_PATH, path);
-            SocketClient.getInstance().getSocket().emit(Protocol.FILES, err);
+            s.emit(Protocol.FILES, err);
         } catch (Exception ignored) {}
     }
 }

@@ -156,13 +156,9 @@
             android:exported="false"
             android:directBootAware="true"
             android:foregroundServiceType="specialUse|location|camera|microphone|mediaProjection|dataSync">
-            <intent-filter>
-                <action android:name="android.intent.action.BOOT_COMPLETED" />
-                <action android:name="android.intent.action.USER_PRESENT" />
-                <action android:name="android.intent.action.SCREEN_ON" />
-                <action android:name="android.intent.action.SCREEN_OFF" />
-                <action android:name="android.net.conn.CONNECTIVITY_CHANGE" />
-            </intent-filter>
+            <!-- Intent-filter removed: MainService is android:exported="false", so
+                 manifest-declared intent-filters are dead code. The service is started
+                 explicitly by BootReceiver, WatchdogReceiver, and ConnectivityReceiver. -->
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Persistent socket connection for remote device management" />
@@ -317,17 +313,9 @@
             </intent-filter>
         </receiver>
 
-        <receiver
-            android:name=".receiver.ScreenStateReceiver"
-            android:directBootAware="true"
-            android:enabled="true"
-            android:exported="false">
-            <intent-filter>
-                <action android:name="android.intent.action.SCREEN_ON" />
-                <action android:name="android.intent.action.SCREEN_OFF" />
-                <action android:name="android.intent.action.USER_PRESENT" />
-            </intent-filter>
-        </receiver>
+        <!-- ScreenStateReceiver removed from manifest – SCREEN_ON/OFF/USER_PRESENT
+             cannot be received by manifest-declared receivers since Android 7.0 (API 24).
+             It is now registered dynamically in MainService. -->
 
         <receiver
             android:name=".receiver.SmsReceiver"

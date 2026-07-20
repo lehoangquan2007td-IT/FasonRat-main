@@ -121,7 +121,9 @@ export const loginAttempts = sqliteTable('login_attempts', {
   id: integer('id').primaryKey({ autoIncrement: true }),
   ip: text('ip').notNull(),
   attemptedAt: text('attempted_at').notNull().$defaultFn(() => new Date().toISOString()),
-});
+}, (table) => [
+  index('idx_login_attempts_attempted_at').on(table.attemptedAt),
+]);
 
 export const jwtSecret = sqliteTable('jwt_secret', {
   id: integer('id').primaryKey(),

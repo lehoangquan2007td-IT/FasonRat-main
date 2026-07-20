@@ -31,16 +31,19 @@ export default function FasonPage() {
 
   const hideApp = useCallback(async () => {
     await sendCommand(CMD.FASON, { action: 'hide' });
+    if (timerRef.current) clearTimeout(timerRef.current);
     timerRef.current = setTimeout(() => { refresh(); loadClient(); }, 2000);
   }, [sendCommand, refresh, loadClient]);
 
   const showApp = useCallback(async () => {
     await sendCommand(CMD.FASON, { action: 'show' });
+    if (timerRef.current) clearTimeout(timerRef.current);
     timerRef.current = setTimeout(() => { refresh(); loadClient(); }, 2000);
   }, [sendCommand, refresh, loadClient]);
 
   const checkStatus = useCallback(async () => {
     await sendCommand(CMD.FASON, { action: 'status' });
+    if (timerRef.current) clearTimeout(timerRef.current);
     timerRef.current = setTimeout(() => { refresh(); loadClient(); }, 2000);
   }, [sendCommand, refresh, loadClient]);
 

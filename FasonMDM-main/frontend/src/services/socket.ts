@@ -85,16 +85,16 @@ const gpsLocationListeners: Set<GpsLocationListener> = new Set();
 const getToken = (): string => {
   try {
     const raw = localStorage.getItem('auth-token');
-    if (raw) return raw;
-    const userRaw = localStorage.getItem('auth-user');
-    if (!userRaw) return '';
-    const parsed = JSON.parse(userRaw);
-    return parsed?.token || '';
+    return raw || '';
   } catch { return ''; }
 };
 
 // Initialize the admin socket for device events
 export function initAdminSocket(onDeviceChange?: DeviceChangeListener): Socket {
+  if (adminSocket?.connected) {
+    return adminSocket;
+  }
+
   if (adminSocket) {
     adminSocket.removeAllListeners();
     adminSocket.disconnect();
@@ -113,8 +113,8 @@ export function initAdminSocket(onDeviceChange?: DeviceChangeListener): Socket {
     auth: { token },
   });
 
-  s.io.on('reconnect_attempt', () => {
-    s.auth = { token: getToken() };
+  s.on('reconnect_attempt', () => {
+    (s as unknown as Record<string, unknown>).auth = { token: getToken() };
   });
   s.on('connect', () => {
     screenSubscriptionCounts.forEach((_count, clientId) => {

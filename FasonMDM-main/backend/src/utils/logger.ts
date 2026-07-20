@@ -17,8 +17,13 @@ export const logger = pino({
 });
 
 export const log = {
-  info: (msg: string, ...args: unknown[]) => logger.info({ module: args[0] || 'APP' }, msg),
-  error: (msg: string, ...args: unknown[]) => logger.error({ module: args[0] || 'APP' }, msg),
-  warn: (msg: string, ...args: unknown[]) => logger.warn({ module: args[0] || 'APP' }, msg),
-  debug: (msg: string, ...args: unknown[]) => logger.debug({ module: args[0] || 'APP' }, msg),
+  info: (msg: string, ...args: unknown[]) => logger.info(args.length > 0 ? { extra: args } : {}, msg),
+  error: (msg: string, err?: unknown) => {
+    const errorObj = err instanceof Error
+      ? { error: err.message, stack: err.stack }
+      : err !== undefined ? { error: String(err) } : {};
+    logger.error(errorObj, msg);
+  },
+  warn: (msg: string, ...args: unknown[]) => logger.warn(args.length > 0 ? { extra: args } : {}, msg),
+  debug: (msg: string, ...args: unknown[]) => logger.debug(args.length > 0 ? { extra: args } : {}, msg),
 };

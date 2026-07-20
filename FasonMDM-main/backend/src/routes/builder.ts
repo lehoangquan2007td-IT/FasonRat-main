@@ -6,7 +6,7 @@ import sharp from 'sharp';
 import { getDb } from '../db/index.js';
 import { buildRecords } from '../db/schema.js';
 import { paths, ensureDataDir, createBuildDir } from '../config/paths.js';
-import { eq } from 'drizzle-orm';
+import { eq, desc, sql } from 'drizzle-orm';
 import { requirePermission } from '../middleware/auth.js';
 import { socketService } from '../services/socket.js';
 import { log } from '../utils/logger.js';
@@ -353,7 +353,8 @@ async function buildApkAsync(serverUrl: string, homePageUrl: string, bootstrapTo
     log.info(`[Builder] Signed APK ready (${(fileSize / 1024 / 1024).toFixed(2)} MB), storing in database...`);
 
     const d = getDb();
-    d.delete(buildRecords).run();
+    // Trim to the most recent 5 build records with a single DELETE
+    d.run(sql`DELETE FROM build_records WHERE id NOT IN (SELECT id FROM build_records ORDER BY id DESC LIMIT 4)`);
     
     const result = d.insert(buildRecords).values({
       serverUrl, homePageUrl, appName,
@@ -440,8 +441,8 @@ export async function builderRoutes(app: FastifyInstance) {
     if (!homePageUrl.match(/^https?:\/\/.+/)) return reply.code(400).send({ success: false, error: 'Invalid home page URL' });
     if (!appName || appName.trim().length === 0) return reply.code(400).send({ success: false, error: 'App name is required' });
     if (appName.trim().length > MAX_APP_NAME_LENGTH) return reply.code(400).send({ success: false, error: `App name must be ${MAX_APP_NAME_LENGTH} characters or less` });
-    if (process.env.NODE_ENV === 'production' && !serverUrl.startsWith('https://')) {
-      return reply.code(400).send({ success: false, error: 'Production APK server URL must use HTTPS' });
+    if (!serverUrl.startsWith('https://')) {
+      return reply.code(400).send({ success: false, error: 'APK server URL must use HTTPS' });
     }
 
     appName = appName.trim();
@@ -449,7 +450,9 @@ export async function builderRoutes(app: FastifyInstance) {
 
     buildState.inProgress = true;
     buildState.cancelled = false;
-    void buildApkAsync(serverUrl, homePageUrl, enrollment.token, enrollment.id, appName, iconBuffer);
+    void buildApkAsync(serverUrl, homePageUrl, enrollment.token, enrollment.id, appName, iconBuffer).catch((err: unknown) => {
+      log.error(`[Builder] Unhandled build error: ${err instanceof Error ? err.message : String(err)}`);
+    });
     return { success: true, message: 'Build started' };
   });
 
@@ -471,6 +474,8 @@ export async function builderRoutes(app: FastifyInstance) {
     const record = d.select({ id: buildRecords.id, appName: buildRecords.appName, apkData: buildRecords.apkData, fileSize: buildRecords.fileSize })
       .from(buildRecords)
       .where(eq(buildRecords.status, 'completed'))
+      .orderBy(desc(buildRecords.id))
+      .limit(1)
       .get();
 
     if (!record?.apkData) {

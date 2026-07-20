@@ -98,7 +98,7 @@ export const useDevicesStore = create<DevicesState>((set, get) => ({
           offlineClients: offline,
           // Preserve existing stats from fetchDashboard, only update client counts
           stats: data.clients ? {
-            ...get().stats,
+            ...(get().stats || {}),
             totalClients: data.total,
             onlineClients: data.online,
             offlineClients: data.offline,

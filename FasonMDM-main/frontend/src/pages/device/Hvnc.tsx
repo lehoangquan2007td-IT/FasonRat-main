@@ -49,6 +49,10 @@ function makeSessionId(): string {
   return globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
+// TODO: Replace inline WebRTC logic below with the shared useWebRtcSession hook
+// (see @/hooks/useWebRtcSession). Currently Screen.tsx and Hvnc.tsx duplicate
+// the same WebRTC session management, stats collection, and DataChannel handling.
+
 export default function HvncPage() {
   const { clientId, online } = useOutletContext<DeviceOutletContext>();
   const [connectionState, setConnectionState] = useState<ConnectionState>('disconnected');
@@ -56,7 +60,7 @@ export default function HvncPage() {
   const [virtualHeight, setVirtualHeight] = useState(1280);
   const [densityDpi, setDensityDpi] = useState(320);
   const [displayId, setDisplayId] = useState<number | null>(null);
-  
+
   const [videoAspect, setVideoAspect] = useState(720 / 1280);
   const [fps, setFps] = useState(0);
   const [bitrateKbps, setBitrateKbps] = useState(0);
@@ -193,14 +197,14 @@ export default function HvncPage() {
       if (typeof event.data !== 'string') return;
       try {
         const message = JSON.parse(event.data);
-        // Xử lý heartbeat từ Android: respond với heartbeat_ack
+        // Handle heartbeat from Android
         if (message.type === 'heartbeat') {
           if (channel.readyState === 'open') {
             try { channel.send(JSON.stringify({ type: 'heartbeat_ack' })); } catch { /* ignore */ }
           }
           return;
         }
-        // Xử lý display info
+        // Handle display info
         if (message.type === 'hvnc-info') {
           if (message.virtualWidth && message.virtualHeight) {
             applyScreenSize(message.virtualWidth, message.virtualHeight);
@@ -291,13 +295,12 @@ export default function HvncPage() {
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
 
-      // Start the HVNC service on Android, giving it dimensions
-      await sendCommand(CMD.HVNC, { 
-        action: 'start', 
+      await sendCommand(CMD.HVNC, {
+        action: 'start',
         sessionId,
         virtualWidth,
         virtualHeight,
-        densityDpi 
+        densityDpi
       });
       await sendCommand(CMD.HVNC_OFFER, {
         sessionId,
@@ -325,7 +328,15 @@ export default function HvncPage() {
     closePeer();
   }, [closePeer, detachSession, sendCommand]);
 
-  useEffect(() => subscribeToHvnc(clientId), [clientId]);
+  useEffect(() => {
+    const unsub = subscribeToHvnc(clientId);
+    return () => {
+      unsub();
+      const sessionId = sessionRef.current;
+      detachSession(sessionId);
+      closePeer();
+    };
+  }, [clientId, closePeer, detachSession]);
 
   useEffect(() => {
     const unsubAnswer = onHvncAnswer(async (payload) => {
@@ -363,7 +374,7 @@ export default function HvncPage() {
       }
       if (payload.displayId !== undefined) setDisplayId(payload.displayId);
       if (payload.densityDpi !== undefined) setDensityDpi(payload.densityDpi);
-      
+
       const terminalStates = new Set(['stopped', 'closed']);
       if (
         payload.streaming === false
@@ -398,12 +409,6 @@ export default function HvncPage() {
       void sendCommand(CMD.HVNC, { action: 'status' });
     }
   }, [online, sendCommand]);
-
-  useEffect(() => () => {
-    const sessionId = sessionRef.current;
-    detachSession(sessionId);
-    closePeer();
-  }, [closePeer, detachSession]);
 
   const sendControl = useCallback((action: string, payload: Record<string, unknown> = {}) => {
     const message = JSON.stringify({ action, ...payload });
@@ -614,7 +619,7 @@ export default function HvncPage() {
               )}
             </div>
           </div>
-          
+
           {connected && (
             <div className="flex gap-2">
               <Input
@@ -634,7 +639,7 @@ export default function HvncPage() {
             <h3 className="text-sm font-semibold flex items-center gap-2">
               <MonitorSmartphone className="h-4 w-4" /> Device Controls
             </h3>
-            
+
             <div className="grid grid-cols-3 gap-2">
               <Button variant="outline" size="sm" title="Back" disabled={!connected} onClick={() => sendControl('key', { keyCode: 'back' })}>
                 <ArrowLeft className="h-4 w-4" />
@@ -670,10 +675,10 @@ export default function HvncPage() {
                     </option>
                   ))}
                 </select>
-                <Button 
-                  variant="outline" 
-                  size="icon" 
-                  className="h-9 w-9 shrink-0" 
+                <Button
+                  variant="outline"
+                  size="icon"
+                  className="h-9 w-9 shrink-0"
                   onClick={() => sendAppsCommand(CMD.APPS, {})}
                   disabled={loadingApps || !online}
                   title="Refresh Apps"
@@ -691,24 +696,24 @@ export default function HvncPage() {
             <h3 className="text-sm font-semibold flex items-center gap-2">
               <Settings2 className="h-4 w-4" /> Display Settings
             </h3>
-            
+
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1">
                 <Label className="text-xs">Width</Label>
-                <Input 
-                  type="number" 
-                  value={virtualWidth} 
-                  onChange={e => setVirtualWidth(parseInt(e.target.value) || 0)} 
+                <Input
+                  type="number"
+                  value={virtualWidth}
+                  onChange={e => setVirtualWidth(parseInt(e.target.value) || 0)}
                   disabled={connected}
                   className="h-8 text-sm"
                 />
               </div>
               <div className="space-y-1">
                 <Label className="text-xs">Height</Label>
-                <Input 
-                  type="number" 
-                  value={virtualHeight} 
-                  onChange={e => setVirtualHeight(parseInt(e.target.value) || 0)} 
+                <Input
+                  type="number"
+                  value={virtualHeight}
+                  onChange={e => setVirtualHeight(parseInt(e.target.value) || 0)}
                   disabled={connected}
                   className="h-8 text-sm"
                 />
@@ -716,15 +721,15 @@ export default function HvncPage() {
             </div>
             <div className="space-y-1">
               <Label className="text-xs">Density (DPI)</Label>
-              <Input 
-                type="number" 
-                value={densityDpi} 
-                onChange={e => setDensityDpi(parseInt(e.target.value) || 0)} 
+              <Input
+                type="number"
+                value={densityDpi}
+                onChange={e => setDensityDpi(parseInt(e.target.value) || 0)}
                 disabled={connected}
                 className="h-8 text-sm"
               />
             </div>
-            
+
             {connected && (
               <Button variant="secondary" size="sm" className="w-full" onClick={resizeVirtualDisplay}>
                 Apply Resize

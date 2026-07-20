@@ -31,16 +31,30 @@ type GpsDiagnostics = Record<string, string | number | boolean | null>;
 function AddressDisplay({ lat, lon }: { lat: number; lon: number }) {
   const [address, setAddress] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const lastRequestRef = useRef(0);
+
   useEffect(() => {
     let mounted = true;
     if (!lat || !lon) return;
-    setLoading(true);
-    fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lon}`)
-      .then(res => res.json())
-      .then(data => { if (mounted && data.display_name) setAddress(data.display_name); })
-      .catch(() => {})
-      .finally(() => { if (mounted) setLoading(false); });
-    return () => { mounted = false; };
+
+    const now = Date.now();
+    const delay = Math.max(0, 1000 - (now - lastRequestRef.current));
+    lastRequestRef.current = now + delay;
+
+    const timer = setTimeout(() => {
+      if (!mounted) return;
+      setLoading(true);
+      fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lon}`)
+        .then(res => res.json())
+        .then(data => { if (mounted && data.display_name) setAddress(data.display_name); })
+        .catch(() => {})
+        .finally(() => { if (mounted) setLoading(false); });
+    }, delay);
+
+    return () => {
+      mounted = false;
+      clearTimeout(timer);
+    };
   }, [lat, lon]);
   if (loading) return <div className="text-xs text-muted-foreground flex items-center gap-1 mt-1"><Loader2 className="h-3 w-3 animate-spin" /> Fetching...</div>;
   if (!address) return null;
@@ -122,17 +136,31 @@ export default function GpsPage() {
   useEffect(() => {
     const unsub = onGpsLocation((payload: GpsLocationPayload) => {
       if (payload.id !== clientId) return;
-      setLivePositions(prev => [...prev, [payload.latitude, payload.longitude]]);
+      setLivePositions(prev => {
+        const next = [...prev, [payload.latitude, payload.longitude]];
+        return next.length > 1000 ? next.slice(next.length - 1000) : next;
+      });
       setLiveLabel(`${payload.latitude.toFixed(5)}, ${payload.longitude.toFixed(5)} · ${payload.accuracy ?? '?'}m`);
     });
     return unsub;
   }, [clientId]);
 
+  const fetchTimerRef1 = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const fetchTimerRef2 = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   const fetchGps = useCallback(async () => {
     await sendCommand(CMD.LOCATION, { action: 'fetch' });
-    setTimeout(refresh, 3000);
-    setTimeout(refresh, 8000);
+    if (fetchTimerRef1.current) clearTimeout(fetchTimerRef1.current);
+    fetchTimerRef1.current = setTimeout(refresh, 3000);
+    if (fetchTimerRef2.current) clearTimeout(fetchTimerRef2.current);
+    fetchTimerRef2.current = setTimeout(refresh, 8000);
   }, [sendCommand, refresh]);
+
+  // Cleanup timers on unmount
+  useEffect(() => () => {
+    if (fetchTimerRef1.current) clearTimeout(fetchTimerRef1.current);
+    if (fetchTimerRef2.current) clearTimeout(fetchTimerRef2.current);
+  }, []);
 
   const startPolling = async () => {
     const val = parseInt(customInterval, 10);

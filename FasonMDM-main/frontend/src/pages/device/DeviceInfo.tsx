@@ -8,6 +8,20 @@ import { Card, CardContent } from '@/components/ui/card';
 import { Smartphone, Battery, HardDrive, Wifi, Monitor, Phone as PhoneIcon } from 'lucide-react';
 import { formatDate, formatBytes, safeNum } from '@/lib/utils';
 
+function StatBar({ label, percent, color }: { label: string; percent: number; color: string }) {
+  return (
+    <div>
+      <div className="flex justify-between text-xs mb-1">
+        <span className="text-muted-foreground">{label}</span>
+        <span className="font-medium">{percent}%</span>
+      </div>
+      <div className="h-2 bg-muted rounded-full overflow-hidden">
+        <div className={`h-full rounded-full transition-all ${color}`} style={{ width: `${Math.min(percent, 100)}%` }} />
+      </div>
+    </div>
+  );
+}
+
 export default function DeviceInfoPage() {
   const { client, clientId, loadClient, online } = useOutletContext<DeviceOutletContext>();
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -46,18 +60,6 @@ export default function DeviceInfoPage() {
   const storUsed = safeNum(deviceInfo?.storage?.used, 0);
   const storFree = safeNum(deviceInfo?.storage?.free, 0);
   const storPercent = storTotal > 0 ? Math.round((storUsed / storTotal) * 100) : 0;
-
-  const StatBar = ({ label, percent, color }: { label: string; percent: number; color: string }) => (
-    <div>
-      <div className="flex justify-between text-xs mb-1">
-        <span className="text-muted-foreground">{label}</span>
-        <span className="font-medium">{percent}%</span>
-      </div>
-      <div className="h-2 bg-muted rounded-full overflow-hidden">
-        <div className={`h-full rounded-full transition-all ${color}`} style={{ width: `${Math.min(percent, 100)}%` }} />
-      </div>
-    </div>
-  );
 
   return (
     <div className="space-y-5">

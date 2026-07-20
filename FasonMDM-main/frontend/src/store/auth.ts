@@ -65,7 +65,7 @@ function safeParseUser(): AuthUser | null {
 
 export const useAuthStore = create<AuthState>((set, get) => ({
   user: safeParseUser(),
-  isAuthenticated: !!localStorage.getItem('auth-user'),
+  isAuthenticated: false, // Will be set by checkAuth; avoid optimistic flash
   isLoading: false,
   isChecking: true,
   error: null,

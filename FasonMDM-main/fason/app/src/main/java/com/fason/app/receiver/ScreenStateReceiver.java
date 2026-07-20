@@ -26,9 +26,10 @@ public class ScreenStateReceiver extends BroadcastReceiver {
                 // Device woke up — verify socket is connected
                 try {
                     SocketClient client = SocketClient.getInstance();
-                    if (client.getSocket() != null && !client.getSocket().connected()) {
+                    io.socket.client.Socket s = client.getSocket();
+                    if (s != null && !s.connected()) {
                         Log.d(TAG, "Socket disconnected, triggering reconnect");
-                        client.getSocket().connect();
+                        s.connect();
                     }
                 } catch (Exception e) {
                     Log.w(TAG, "Socket reconnect on screen ON failed: " + e.getMessage());

@@ -8,6 +8,7 @@ import { Mic as MicIcon, Square, CircleStop } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { onDataUpdate } from '@/services/socket';
+import { sanitizePath } from '@/lib/utils';
 
 export default function MicPage() {
   const { clientId, online } = useOutletContext<DeviceOutletContext>();
@@ -169,7 +170,7 @@ export default function MicPage() {
                     <p className="text-[10px] text-muted-foreground">{rec.createdAt ? new Date(rec.createdAt).toLocaleString() : '—'}</p>
                   </div>
                   <audio controls className="h-7 w-32 sm:w-40">
-                    <source src={`/api/files/recordings/${clientId}/${rec.id}`} type="audio/mp4" />
+                    <source src={`/api/files/recordings/${sanitizePath(clientId)}/${sanitizePath(rec.id)}`} type="audio/mp4" />
                   </audio>
                 </div>
               ))}

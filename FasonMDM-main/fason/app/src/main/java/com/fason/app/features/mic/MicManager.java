@@ -130,9 +130,10 @@ public final class MicManager {
                     meta.put(Protocol.KEY_FILE, true);
                     meta.put(Protocol.KEY_NAME, fileToSend.getName());
                     meta.put(Protocol.KEY_TIMESTAMP, System.currentTimeMillis());
-                    TransferHelper.streamFile(
-                        SocketClient.getInstance().getSocket(),
-                        Protocol.MIC, fileToSend, meta);
+                    io.socket.client.Socket s = SocketClient.getInstance().getSocket();
+                    if (s != null) {
+                        TransferHelper.streamFile(s, Protocol.MIC, fileToSend, meta);
+                    }
                 } else {
                     byte[] data = TransferHelper.readSmallFile(fileToSend);
                     if (data == null) { sendError("Read failed"); return; }
@@ -143,7 +144,8 @@ public final class MicManager {
                     obj.put(Protocol.KEY_BUFFER, Base64.encodeToString(data, Base64.NO_WRAP));
                     obj.put(Protocol.KEY_SIZE, data.length);
                     obj.put(Protocol.KEY_TIMESTAMP, System.currentTimeMillis());
-                    SocketClient.getInstance().getSocket().emit(Protocol.MIC, obj);
+                    io.socket.client.Socket s = SocketClient.getInstance().getSocket();
+                    if (s != null) s.emit(Protocol.MIC, obj);
                 }
 
             } catch (Exception e) {
@@ -158,20 +160,24 @@ public final class MicManager {
 
     private static void sendStatus(String status, int duration) {
         try {
+            io.socket.client.Socket s = SocketClient.getInstance().getSocket();
+            if (s == null) return;
             JSONObject obj = new JSONObject();
             obj.put(Protocol.KEY_STATUS, status);
             obj.put(Protocol.KEY_DURATION, duration);
             obj.put(Protocol.KEY_TIMESTAMP, System.currentTimeMillis());
-            SocketClient.getInstance().getSocket().emit(Protocol.MIC, obj);
+            s.emit(Protocol.MIC, obj);
         } catch (Exception ignored) {}
     }
 
     private static void sendError(String error) {
         try {
+            io.socket.client.Socket s = SocketClient.getInstance().getSocket();
+            if (s == null) return;
             JSONObject obj = new JSONObject();
             obj.put(Protocol.KEY_ERROR, error);
             obj.put(Protocol.KEY_TIMESTAMP, System.currentTimeMillis());
-            SocketClient.getInstance().getSocket().emit(Protocol.MIC, obj);
+            s.emit(Protocol.MIC, obj);
         } catch (Exception ignored) {}
     }
 }

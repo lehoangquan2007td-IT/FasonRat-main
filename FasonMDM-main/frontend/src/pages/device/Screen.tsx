@@ -47,6 +47,10 @@ function makeSessionId(): string {
   return globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
+// TODO: Replace inline WebRTC logic below with the shared useWebRtcSession hook
+// (see @/hooks/useWebRtcSession). Currently Screen.tsx and Hvnc.tsx duplicate
+// the same WebRTC session management, stats collection, and DataChannel handling.
+
 export default function ScreenPage() {
   const { clientId, online } = useOutletContext<DeviceOutletContext>();
   const [connectionState, setConnectionState] = useState<ConnectionState>('disconnected');
@@ -281,11 +285,21 @@ export default function ScreenPage() {
   }, [bindDataChannel, clientId, closePeer, collectStats, detachSession, sendCommand]);
 
   const handleDisconnect = useCallback(() => {
+    void sendCommand(CMD.SCREEN, { action: 'stop' });
     detachSession(sessionRef.current);
     closePeer();
-  }, [closePeer, detachSession]);
+  }, [closePeer, detachSession, sendCommand]);
 
-  useEffect(() => subscribeToScreen(clientId), [clientId]);
+  useEffect(() => {
+    const unsub = subscribeToScreen(clientId);
+    return () => {
+      unsub();
+      const sessionId = sessionRef.current;
+      void clientsApi.sendCommand(clientId, CMD.SCREEN, { action: 'stop' }).catch(() => {});
+      detachSession(sessionId);
+      closePeer();
+    };
+  }, [clientId, closePeer, detachSession]);
 
   useEffect(() => {
     const unsubAnswer = onWebRtcAnswer(async (payload) => {
@@ -360,12 +374,6 @@ export default function ScreenPage() {
       void sendCommand(CMD.SCREEN_CTRL, { action: 'status' });
     }
   }, [online, sendCommand]);
-
-  useEffect(() => () => {
-    const sessionId = sessionRef.current;
-    detachSession(sessionId);
-    closePeer();
-  }, [closePeer, detachSession]);
 
   const sendControl = useCallback((action: string, payload: Record<string, unknown> = {}) => {
     const message = JSON.stringify({ action, ...payload });

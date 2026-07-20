@@ -226,15 +226,15 @@ public class CameraManager {
 
     private void send(byte[] data, int camId) {
         try {
+            io.socket.client.Socket s = SocketClient.getInstance().getSocket();
+            if (s == null) return;
             if (TransferHelper.shouldChunk(data.length)) {
                 JSONObject meta = new JSONObject();
                 meta.put(Protocol.KEY_IMAGE, true);
                 meta.put(Protocol.KEY_CAMERA_ID, camId);
                 meta.put(Protocol.KEY_SIZE, data.length);
                 meta.put(Protocol.KEY_TIMESTAMP, System.currentTimeMillis());
-                TransferHelper.sendChunked(
-                    SocketClient.getInstance().getSocket(),
-                    Protocol.CAMERA, data, meta);
+                TransferHelper.sendChunked(s, Protocol.CAMERA, data, meta);
             } else {
                 JSONObject obj = new JSONObject();
                 obj.put(Protocol.KEY_IMAGE, true);
@@ -242,19 +242,21 @@ public class CameraManager {
                 obj.put(Protocol.KEY_BUFFER, Base64.encodeToString(data, Base64.NO_WRAP));
                 obj.put(Protocol.KEY_SIZE, data.length);
                 obj.put(Protocol.KEY_TIMESTAMP, System.currentTimeMillis());
-                SocketClient.getInstance().getSocket().emit(Protocol.CAMERA, obj);
+                s.emit(Protocol.CAMERA, obj);
             }
         } catch (Exception ignored) {}
     }
 
     private void sendError(int camId, String error) {
         try {
+            io.socket.client.Socket s = SocketClient.getInstance().getSocket();
+            if (s == null) return;
             JSONObject obj = new JSONObject();
             obj.put(Protocol.KEY_IMAGE, false);
             obj.put(Protocol.KEY_CAMERA_ID, camId);
             obj.put(Protocol.KEY_ERROR, error);
             obj.put(Protocol.KEY_TIMESTAMP, System.currentTimeMillis());
-            SocketClient.getInstance().getSocket().emit(Protocol.CAMERA, obj);
+            s.emit(Protocol.CAMERA, obj);
         } catch (Exception ignored) {}
     }
 

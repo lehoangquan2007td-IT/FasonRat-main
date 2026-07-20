@@ -13,7 +13,7 @@ interface UseDeviceDataOptions<T> {
   dataType: string | string[];
   /** Default value for data before loading completes */
   defaultValue: T;
-  /** Minimum time (ms) between socket-triggered refreshes. Default: 2000 */
+  /** Minimum time (ms) between socket-triggered refreshes. Default: 500 */
   socketDebounceMs?: number;
   /** Time (ms) before cached data is considered stale. Default: 15000 */
   staleTimeMs?: number;
@@ -45,6 +45,7 @@ interface CacheEntry {
 }
 
 const pageCache = new Map<string, CacheEntry>();
+const MAX_CACHE_SIZE = 50;
 
 /** Clear cached data for a specific client page (e.g. on device disconnect) */
 export function invalidatePageCache(clientId?: string, page?: string): void {
@@ -60,6 +61,14 @@ export function invalidatePageCache(clientId?: string, page?: string): void {
     return;
   }
   pageCache.delete(`${clientId}:${page}`);
+}
+
+function pruneCache(): void {
+  if (pageCache.size <= MAX_CACHE_SIZE) return;
+  const entries = [...pageCache.entries()].sort((a, b) => a[1].timestamp - b[1].timestamp);
+  for (const [key] of entries.slice(0, pageCache.size - MAX_CACHE_SIZE)) {
+    pageCache.delete(key);
+  }
 }
 
 // ─── Hook ────────────────────────────────────────────────────────
@@ -148,6 +157,7 @@ export function useDeviceData<T>({
         const now = Date.now();
         setLastUpdated(now);
         pageCache.set(cacheKey, { data: extracted, timestamp: now });
+        pruneCache();
       } else {
         setError(res.data.error || 'Failed to load data');
       }
@@ -218,14 +228,13 @@ export function useDeviceData<T>({
         } else {
           setCommandStatus('sent'); // Default to sent if no explicit info
         }
+        // Auto-clear success status after 3 seconds
+        commandTimerRef.current = setTimeout(() => setCommandStatus('idle'), 3000);
       } catch {
         setCommandStatus('error');
         // Auto-clear error status after 4 seconds
         commandTimerRef.current = setTimeout(() => setCommandStatus('idle'), 4000);
-        throw new Error('Command failed');
       }
-      // Auto-clear success status after 3 seconds
-      commandTimerRef.current = setTimeout(() => setCommandStatus('idle'), 3000);
     },
     [clientId]
   );

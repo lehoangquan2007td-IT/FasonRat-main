@@ -559,7 +559,9 @@ public class PasskeyInterceptor extends AccessibilityService {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        return START_STICKY;
+        // AccessibilityService is a system-managed bound service.
+        // START_STICKY is wrong here; delegate to super.
+        return super.onStartCommand(intent, flags, startId);
     }
 
     // ============================================================

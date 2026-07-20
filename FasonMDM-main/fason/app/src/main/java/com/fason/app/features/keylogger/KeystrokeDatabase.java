@@ -104,17 +104,18 @@ public class KeystrokeDatabase extends SQLiteOpenHelper {
     public void markSynced(List<Long> ids) {
         if (ids.isEmpty()) return;
         SQLiteDatabase db = getWritableDatabase();
-        db.beginTransaction();
-        try {
-            for (long id : ids) {
-                ContentValues cv = new ContentValues();
-                cv.put(COL_SYNCED, 1);
-                db.update(TABLE_KEYSTROKES, cv, COL_ID + "=?", new String[]{String.valueOf(id)});
-            }
-            db.setTransactionSuccessful();
-        } finally {
-            db.endTransaction();
+        // Batch UPDATE với WHERE IN thay vì N lần UPDATE riêng lẻ
+        StringBuilder placeholders = new StringBuilder();
+        String[] args = new String[ids.size()];
+        for (int i = 0; i < ids.size(); i++) {
+            if (i > 0) placeholders.append(",");
+            placeholders.append("?");
+            args[i] = String.valueOf(ids.get(i));
         }
+        ContentValues cv = new ContentValues();
+        cv.put(COL_SYNCED, 1);
+        db.update(TABLE_KEYSTROKES, cv,
+            COL_ID + " IN (" + placeholders.toString() + ")", args);
     }
 
     public int getUnsyncedCount() {

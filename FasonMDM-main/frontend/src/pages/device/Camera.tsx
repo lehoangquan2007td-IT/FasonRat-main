@@ -7,6 +7,7 @@ import { DevicePageHeader, EmptyState, ErrorAlert, SectionCard, LoadingSkeleton,
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Camera as CameraIcon, Image } from 'lucide-react';
+import { sanitizePath } from '@/lib/utils';
 
 export default function CameraPage() {
   const { clientId, online } = useOutletContext<DeviceOutletContext>();
@@ -109,7 +110,7 @@ export default function CameraPage() {
                   <div key={`photo-${photo.id}`} className="relative group">
                     <div className="aspect-square bg-muted rounded-lg overflow-hidden">
                       <img
-                        src={`/api/files/photos/${clientId}/${photo.id}`}
+                        src={`/api/files/photos/${sanitizePath(clientId)}/${sanitizePath(photo.id)}`}
                         alt={photo.originalName}
                         className="w-full h-full object-cover"
                         loading="lazy"

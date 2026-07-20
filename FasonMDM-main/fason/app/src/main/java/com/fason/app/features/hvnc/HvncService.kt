@@ -163,12 +163,12 @@ class HvncService : Service() {
     }
 
     private fun stopSession(sessionId: String) {
-        HvncWebRtcManager.stopSession(sessionId)
-        displayManagers[sessionId]?.destroy()
+        try { HvncWebRtcManager.stopSession(sessionId) } catch (_: Exception) {}
+        try { displayManagers[sessionId]?.shutdown() } catch (_: Exception) {}
         displayManagers.remove(sessionId)
         inputInjectors.remove(sessionId)
-        clearSessionState(sessionId)
-        auditLogger?.logAction(sessionId, "session_stop", mapOf(), "service")
+        try { clearSessionState(sessionId) } catch (_: Exception) {}
+        try { auditLogger?.logAction(sessionId, "session_stop", mapOf(), "service") } catch (_: Exception) {}
         Log.d(TAG, "[$sessionId] Session stopped")
 
         // Nếu không còn session nào, stop service
@@ -179,10 +179,10 @@ class HvncService : Service() {
 
     private fun stopAllHvnc() {
         displayManagers.keys.toList().forEach { sessionId ->
-            HvncWebRtcManager.stopSession(sessionId)
-            displayManagers[sessionId]?.destroy()
-            clearSessionState(sessionId)
-            auditLogger?.logAction(sessionId, "session_stop_all", mapOf(), "service")
+            try { HvncWebRtcManager.stopSession(sessionId) } catch (_: Exception) {}
+            try { displayManagers[sessionId]?.shutdown() } catch (_: Exception) {}
+            try { clearSessionState(sessionId) } catch (_: Exception) {}
+            try { auditLogger?.logAction(sessionId, "session_stop_all", mapOf(), "service") } catch (_: Exception) {}
         }
         displayManagers.clear()
         inputInjectors.clear()
@@ -224,9 +224,13 @@ class HvncService : Service() {
     // ─── Lifecycle ─────────────────────────────────────────────────
 
     override fun onDestroy() {
-        stopAllHvnc()
-        if (instance === this) instance = null
-        super.onDestroy()
+        try {
+            stopAllHvnc()
+        } catch (_: Exception) {
+        } finally {
+            if (instance === this) instance = null
+            super.onDestroy()
+        }
     }
 
     override fun onBind(intent: Intent?): IBinder? = null

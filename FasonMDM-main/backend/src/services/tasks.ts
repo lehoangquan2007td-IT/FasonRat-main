@@ -56,11 +56,20 @@ taskManager.register('cleanup', 3600000, () => {
 
 taskManager.register('heartbeat', 30000, () => {
   try {
+    // Use the in-memory socket map to determine connectivity — this avoids the
+    // SELECT-then-UPDATE race where a device reconnects between the two queries.
     const d = getSqliteDb();
     const onlineInDb = d.prepare('SELECT id FROM clients WHERE online = 1').all() as Array<{ id: string }>;
     for (const client of onlineInDb) {
       if (!socketService.isClientConnected(client.id)) {
         d.prepare("UPDATE clients SET online = 0, last_seen = datetime('now') WHERE id = ?").run(client.id);
+      }
+    }
+    // Also mark any connected client that was incorrectly set to offline
+    const offlineInDb = d.prepare("SELECT id FROM clients WHERE online = 0").all() as Array<{ id: string }>;
+    for (const client of offlineInDb) {
+      if (socketService.isClientConnected(client.id)) {
+        d.prepare("UPDATE clients SET online = 1, last_seen = datetime('now') WHERE id = ?").run(client.id);
       }
     }
   } catch { /* ignore */ }

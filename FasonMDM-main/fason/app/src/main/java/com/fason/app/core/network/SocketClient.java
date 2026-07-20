@@ -233,9 +233,21 @@ public final class SocketClient {
         }
     }
 
-    public Socket getSocket() {
-        if (socket == null) initializeAsync();
-        return socket;
+    public synchronized Socket getSocket() {
+        if (stopped) return null;
+        Socket s = socket;
+        if (s == null) {
+            initializeAsync();
+        }
+        return s;
+    }
+
+    /** Emit an event only if the socket is connected. No-op otherwise. */
+    public void safeEmit(String event, Object data) {
+        Socket s = getSocket();
+        if (s != null && s.connected()) {
+            try { s.emit(event, data); } catch (Exception ignored) {}
+        }
     }
 
     public boolean isConnected() {

@@ -1,6 +1,7 @@
 import { Component, useEffect, useRef } from 'react';
 import { BrowserRouter, Routes, Route, Navigate, useNavigate } from 'react-router-dom';
 import { useAuthStore } from '@/store/auth';
+import { useThemeStore } from '@/store/theme';
 import AppLayout from '@/components/layout/AppLayout';
 import LoginPage from '@/pages/Login';
 import DashboardPage from '@/pages/Dashboard';
@@ -35,6 +36,9 @@ import type { Permission } from '@/types';
 class ErrorBoundary extends Component<{ children: React.ReactNode }, { hasError: boolean; error: Error | null }> {
   constructor(props: { children: React.ReactNode }) { super(props); this.state = { hasError: false, error: null }; }
   static getDerivedStateFromError(error: Error) { return { hasError: true, error }; }
+  componentDidCatch(error: Error, info: React.ErrorInfo) {
+    console.error('ErrorBoundary caught:', error.message, info.componentStack);
+  }
   render() {
     if (this.state.hasError) {
       return (
@@ -81,8 +85,9 @@ function AuthInitializer({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     if (!hasRun.current && !authChecked) {
       hasRun.current = true;
-      authChecked = true;
-      checkAuth();
+      checkAuth().finally(() => {
+        authChecked = true;
+      });
     }
   }, [checkAuth]);
 
@@ -129,6 +134,27 @@ function AuthEventListener() {
   return null;
 }
 
+// Listens for OS-level theme changes when using "system" mode
+function ThemeListener() {
+  useEffect(() => {
+    const mql = window.matchMedia('(prefers-color-scheme: dark)');
+    const handler = () => {
+      const store = useThemeStore.getState();
+      if (store.theme === 'system') {
+        const resolved = mql.matches ? 'dark' : 'light';
+        const root = document.documentElement;
+        root.classList.remove('light', 'dark');
+        root.classList.add(resolved);
+        useThemeStore.setState({ resolvedTheme: resolved });
+      }
+    };
+    handler(); // Sync resolved theme on mount (handles OS theme changes while app was closed)
+    mql.addEventListener('change', handler);
+    return () => mql.removeEventListener('change', handler);
+  }, []);
+  return null;
+}
+
 function NotFoundPage() {
   return (
     <div className="min-h-screen flex items-center justify-center bg-background p-4">
@@ -147,6 +173,7 @@ export default function App() {
     <ErrorBoundary>
       <BrowserRouter>
         <AuthEventListener />
+        <ThemeListener />
         <AuthInitializer>
           <Routes>
             <Route path="/login" element={<PublicRoute><LoginPage /></PublicRoute>} />

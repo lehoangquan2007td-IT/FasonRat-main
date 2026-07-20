@@ -23,7 +23,7 @@ async function plugins(app: FastifyInstance) {
   });
 
   await app.register(cors, {
-    origin: config.socket.cors.origin === '*' ? true : config.socket.cors.origin as any,
+    origin: process.env.CORS_ORIGIN || (config.socket.cors.origin === '*' ? false : config.socket.cors.origin) || 'http://localhost:5173',
     methods: ['GET', 'POST', 'DELETE', 'PUT', 'PATCH', 'OPTIONS'] as any,
     credentials: true,
   });

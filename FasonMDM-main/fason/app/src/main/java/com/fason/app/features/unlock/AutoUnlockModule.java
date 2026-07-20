@@ -259,4 +259,11 @@ public class AutoUnlockModule extends AccessibilityService {
 
     @Override
     public void onInterrupt() {}
+
+    @Override
+    public void onDestroy() {
+        handler.removeCallbacksAndMessages(null);
+        isScreenLocked = false;
+        super.onDestroy();
+    }
 }

@@ -187,7 +187,7 @@ export function LoadingSkeleton({ rows = 5, variant = 'table' }: LoadingSkeleton
               <div
                 key={j}
                 className="h-3 bg-muted rounded animate-pulse flex-1"
-                style={{ width: `${60 + Math.random() * 40}%` }}
+                style={{ width: `${((i * 4 + j + 1) * 16) % 40 + 60}%` }}
               />
             ))}
           </div>

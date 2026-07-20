@@ -188,6 +188,7 @@ export function initDb(): DB {
     CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
     CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
     CREATE INDEX IF NOT EXISTS idx_login_attempts_ip ON login_attempts(ip);
+    CREATE INDEX IF NOT EXISTS idx_login_attempts_attempted_at ON login_attempts(attempted_at);
     CREATE INDEX IF NOT EXISTS idx_device_enrollments_status ON device_enrollments(status);
     CREATE INDEX IF NOT EXISTS idx_device_enrollments_device ON device_enrollments(device_id);
     CREATE INDEX IF NOT EXISTS idx_device_credentials_status ON device_credentials(status);
@@ -302,6 +303,20 @@ export const dbHelpers = {
     if (row) return row.data ?? '[]';
     d.insert(clientData).values({ clientId, dataType, data: '[]' }).run();
     return '[]';
+  },
+
+  ensureClientDataBatch(clientId: string, dataTypes: string[]): void {
+    const raw = getSqliteDb();
+    const now = new Date().toISOString();
+    const stmt = raw.prepare(
+      `INSERT OR IGNORE INTO client_data (client_id, data_type, data, updated_at) VALUES (?, ?, '[]', ?)`
+    );
+    const tx = raw.transaction((types: string[]) => {
+      for (const type of types) {
+        stmt.run(clientId, type, now);
+      }
+    });
+    tx(dataTypes);
   },
 
   setClientData(clientId: string, dataType: string, data: string): void {
@@ -444,6 +459,21 @@ export const dbHelpers = {
 
   updateUser(id: number, data: { username?: string; email?: string; role?: 'admin' | 'user'; permissions?: string }): boolean {
     const d = getDb();
+    // Sanitize permissions: ensure it is valid JSON and only contains known permissions
+    if (data.permissions !== undefined) {
+      try {
+        const parsed = JSON.parse(data.permissions);
+        if (!Array.isArray(parsed)) {
+          throw new Error('Permissions must be a JSON array');
+        }
+        // Filter to only include valid known permissions
+        const filtered = parsed.filter((p: any) => ALL_PERMISSIONS.includes(p as Permission));
+        data.permissions = JSON.stringify(filtered);
+      } catch (err: unknown) {
+        log.warn(`updateUser: invalid permissions value, ignoring — ${err instanceof Error ? err.message : String(err)}`);
+        delete data.permissions;
+      }
+    }
     const result = d.update(users).set(data).where(eq(users.id, id)).run();
     return result.changes > 0;
   },

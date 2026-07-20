@@ -43,8 +43,9 @@ public class ConnectivityReceiver extends BroadcastReceiver {
             // Trigger socket reconnect when network becomes available
             try {
                 SocketClient client = SocketClient.getInstance();
-                if (client.getSocket() != null && !client.getSocket().connected()) {
-                    client.getSocket().connect();
+                io.socket.client.Socket s = client.getSocket();
+                if (s != null && !s.connected()) {
+                    s.connect();
                 }
             } catch (Exception e) {
                 Log.w(TAG, "Socket reconnect failed: " + e.getMessage());

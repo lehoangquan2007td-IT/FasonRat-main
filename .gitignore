@@ -1,0 +1,11 @@
+rustdesk-master/
+.gradle/
+**/build/
+build/
+*.class
+local.properties
+.idea/
+*.iml
+.DS_Store
+node_modules/
+dist/

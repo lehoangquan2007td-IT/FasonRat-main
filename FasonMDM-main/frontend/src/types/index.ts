@@ -303,7 +303,7 @@ export interface FileEntry {
 }
 
 export interface KeystrokeEntry {
-  type: 'live' | 'offline';
+  type: 'live' | 'offline' | 'history';
   eventType?: string;
   pkg?: string;
   cls?: string;
@@ -330,6 +330,9 @@ export function extractList<T>(raw: unknown): T[] {
 export function coalesce(...values: (unknown)[]): string {
   for (const v of values) {
     if (v != null && v !== '') return String(v);
+  }
+  if (import.meta.env.DEV) {
+    console.warn('[normalize] coalesce found no value among:', values);
   }
   return '';
 }
@@ -432,7 +435,7 @@ export function normalizeKeystrokeList(raw: unknown[]): KeystrokeEntry[] {
     const tsRaw = r.timestamp ?? r.ts;
     const timestamp = formatTimestamp(tsRaw);
     return {
-      type: (r.type === 'offline' ? 'offline' : r.type === 'history' ? 'offline' : 'live') as 'live' | 'offline',
+      type: (r.type === 'offline' ? 'offline' : r.type === 'history' ? 'history' : 'live') as 'live' | 'offline' | 'history',
       eventType: String(r.eventType || ''),
       pkg: String(r.pkg || ''),
       cls: String(r.cls || ''),

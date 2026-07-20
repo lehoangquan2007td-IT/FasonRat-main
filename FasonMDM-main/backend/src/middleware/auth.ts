@@ -18,10 +18,7 @@ export async function authMiddleware(request: FastifyRequest, reply: FastifyRepl
     token = request.cookies.token;
   }
 
-  if (!token) {
-    const queryToken = (request.query as Record<string, string | undefined>)?.token;
-    if (typeof queryToken === 'string') token = queryToken;
-  }
+  // JWT from URL query is deliberately NOT accepted — it leaks tokens into logs & referrers.
 
   if (!token) {
     reply.code(401).send({ success: false, error: 'Authentication required' });
@@ -38,9 +35,11 @@ export async function authMiddleware(request: FastifyRequest, reply: FastifyRepl
       return;
     }
 
+    // Validate that the SPECIFIC token matches an active session, not just
+    // that ANY session exists for the user.
     const d = getDb();
     const activeSession = d.select({ token: sessions.token }).from(sessions)
-      .where(eq(sessions.userId, user.id))
+      .where(eq(sessions.token, decoded.sessionId))
       .get();
     if (!activeSession) {
       reply.clearCookie('token', { path: '/' });
@@ -57,7 +56,6 @@ export async function authMiddleware(request: FastifyRequest, reply: FastifyRepl
       role: user.role as UserRole,
       permissions,
     };
-    (request as unknown as Record<string, unknown>).token = token;
   } catch {
     reply.clearCookie('token', { path: '/' });
     reply.code(401).send({ success: false, error: 'Invalid token' });
@@ -88,11 +86,21 @@ export function getRequestUser(request: FastifyRequest): JwtPayload {
   return request.user as JwtPayload;
 }
 
-export function verifyJwtToken(token: string, jwtVerify: (token: string) => unknown): JwtPayload | null {
+export function verifyJwtToken(token: string, jwtVerify: (token: string) => JwtPayload): JwtPayload | null {
   try {
-    const decoded = jwtVerify(token) as JwtPayload;
+    const decoded = jwtVerify(token);
     const dbUser = dbHelpers.getUserById(decoded.userId);
     if (!dbUser) return null;
+
+    // Verify session still exists in DB after logout
+    if (decoded.sessionId) {
+      const d = getDb();
+      const activeSession = d.select({ token: sessions.token }).from(sessions)
+        .where(eq(sessions.token, decoded.sessionId))
+        .get();
+      if (!activeSession) return null;
+    }
+
     const permissions = resolvePermissions(dbUser.role as UserRole, dbUser.permissions);
     return {
       userId: dbUser.id,

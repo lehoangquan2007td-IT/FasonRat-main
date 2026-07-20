@@ -21,8 +21,8 @@ api.interceptors.response.use(
   (response) => response,
   (error) => {
     if (error.response?.status === 401) {
-      const url = error.config?.url || '';
-      const isAuthEndpoint = AUTH_WHITELIST.some(ep => url.includes(ep));
+      const url: string = error.config?.url || '';
+      const isAuthEndpoint = AUTH_WHITELIST.some(ep => url === ep || url.endsWith(ep));
       if (!isAuthEndpoint) {
         localStorage.removeItem('auth-user');
         localStorage.removeItem('auth-token');

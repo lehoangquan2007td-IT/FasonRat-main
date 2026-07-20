@@ -6,7 +6,7 @@ import { Card } from '@/components/ui/card';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Button } from '@/components/ui/button';
 import { Download, File } from 'lucide-react';
-import { formatBytes, formatDate } from '@/lib/utils';
+import { formatBytes, formatDate, sanitizePath } from '@/lib/utils';
 
 export default function DownloadsPage() {
   const { clientId, online } = useOutletContext<DeviceOutletContext>();
@@ -62,7 +62,7 @@ export default function DownloadsPage() {
                   <TableCell className="text-xs text-muted-foreground">{formatBytes(file.fileSize)}</TableCell>
                   <TableCell className="text-xs text-muted-foreground hidden sm:table-cell whitespace-nowrap">{file.createdAt ? formatDate(file.createdAt) : '—'}</TableCell>
                   <TableCell>
-                    <a href={`/api/files/downloads/${clientId}/${file.id}`} download>
+                    <a href={`/api/files/downloads/${sanitizePath(clientId)}/${sanitizePath(file.id)}`} download>
                       <Button variant="ghost" size="icon" className="h-7 w-7" aria-label="Download file">
                         <Download className="h-3.5 w-3.5" />
                       </Button>

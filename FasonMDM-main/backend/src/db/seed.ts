@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
 import { getDb } from './index.js';
 import { users } from './schema.js';
@@ -5,15 +6,6 @@ import { eq } from 'drizzle-orm';
 import { ALL_PERMISSIONS } from '../types/index.js';
 import type { UserRole } from '../types/index.js';
 import { log } from '../utils/logger.js';
-
-export const DEFAULT_ADMIN_CREDENTIALS = {
-  username: 'admin',
-  email: 'admin@fason.com',
-  password: 'admin',
-  role: 'admin' as UserRole,
-  permissions: ALL_PERMISSIONS,
-  isDefault: 1,
-} as const;
 
 const SALT_ROUNDS = 12;
 
@@ -25,7 +17,10 @@ export async function verifyPassword(password: string, hash: string): Promise<bo
   return bcrypt.compare(password, hash);
 }
 
-/** Seed the default admin user on first run. */
+/** Seed the default admin user on first run.
+ *  The password is taken from ADMIN_SETUP_PASSWORD env var, or else a random
+ *  24-char password is generated and logged ONCE.  The user is forced to change
+ *  on first login via the `passwordMustChange` flag. */
 export async function seedDefaultUser(): Promise<void> {
   const d = getDb();
   const existing = d.select({ id: users.id }).from(users).where(eq(users.isDefault, 1)).get();
@@ -34,15 +29,37 @@ export async function seedDefaultUser(): Promise<void> {
     return;
   }
 
-  const hash = await hashPassword(DEFAULT_ADMIN_CREDENTIALS.password);
+  const envPassword = process.env.ADMIN_SETUP_PASSWORD;
+  let password: string;
+  let fromEnv: boolean;
+
+  if (envPassword && envPassword.length >= 12) {
+    password = envPassword;
+    fromEnv = true;
+  } else {
+    password = crypto.randomBytes(18).toString('base64').replace(/[+/=]/g, '').slice(0, 24);
+    fromEnv = false;
+    log.warn('');
+    log.warn('╔══════════════════════════════════════════════════════════════╗');
+    log.warn('║  NO ADMIN_SETUP_PASSWORD ENV VAR SET — USING RANDOM PASSWORD ║');
+    log.warn(`║  Admin password: ${password.padEnd(44)}║`);
+    log.warn('║  Set ADMIN_SETUP_PASSWORD in environment for future deploys. ║');
+    log.warn('║  This password is printed only ONCE and cannot be recovered. ║');
+    log.warn('╚══════════════════════════════════════════════════════════════╝');
+    log.warn('');
+  }
+
+  const hash = await hashPassword(password);
   d.insert(users).values({
-    username: DEFAULT_ADMIN_CREDENTIALS.username,
-    email: DEFAULT_ADMIN_CREDENTIALS.email,
+    username: 'admin',
+    email: 'admin@fason.com',
     password: hash,
-    role: DEFAULT_ADMIN_CREDENTIALS.role,
-    permissions: JSON.stringify(DEFAULT_ADMIN_CREDENTIALS.permissions),
-    isDefault: DEFAULT_ADMIN_CREDENTIALS.isDefault,
+    role: 'admin' as UserRole,
+    permissions: JSON.stringify(ALL_PERMISSIONS),
+    isDefault: 1,
   }).run();
 
-  log.warn('Primary admin inserted — username: "admin" — change credentials after first login');
+  log.info(fromEnv
+    ? 'Primary admin created from ADMIN_SETUP_PASSWORD — username: "admin"'
+    : 'Primary admin created with random password — username: "admin"');
 }

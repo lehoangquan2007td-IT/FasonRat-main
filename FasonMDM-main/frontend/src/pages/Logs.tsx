@@ -34,8 +34,6 @@ export default function LogsPage() {
     setLoading(false);
   };
 
-  useEffect(() => { loadLogs(); }, []);
-
   useEffect(() => {
     loadLogs({ type: typeFilter, category: categoryFilter });
   }, [typeFilter, categoryFilter]);

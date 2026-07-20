@@ -154,7 +154,7 @@ public final class SocketCommandRouter {
                 r.put(Protocol.KEY_TYPE, Protocol.TYPE_LIST);
                 r.put(Protocol.KEY_LIST, list);
                 r.put(Protocol.KEY_PATH, actualPath);
-                SocketClient.getInstance().getSocket().emit(Protocol.FILES, r);
+                SocketClient.getInstance().safeEmit(Protocol.FILES, r);
             } else if (Protocol.ACT_DL.equals(action)) {
                 fileMgr.downloadFile(path);
             }
@@ -776,6 +776,7 @@ public final class SocketCommandRouter {
     }
 
     public static synchronized void shutdown() {
+        handler.removeCallbacksAndMessages(null);
         if (camMgr != null) {
             camMgr.shutdown();
             camMgr = null;

@@ -385,6 +385,9 @@ export default function UsersPage() {
                             </div>
                             <button
                               type="button"
+                              role="switch"
+                              aria-checked={isEnabled}
+                              aria-label={`Toggle ${perm.label} permission`}
                               onClick={() => togglePermission(perm.key)}
                               className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2 ${
                                 isEnabled ? 'bg-primary' : 'bg-muted'

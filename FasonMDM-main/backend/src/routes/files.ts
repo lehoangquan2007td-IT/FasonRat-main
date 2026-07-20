@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { getDb } from '../db/index.js';
-import { clientFiles } from '../db/schema.js';
+import { clients, clientFiles } from '../db/schema.js';
 import { eq, and } from 'drizzle-orm';
 import { requirePermission, hasPermission } from '../middleware/auth.js';
 import type { JwtPayload, Permission } from '../types/index.js';
@@ -36,8 +36,14 @@ export async function fileRoutes(app: FastifyInstance) {
 function checkDeviceAccess(request: FastifyRequest, clientId: string): boolean {
   const user = request.user as JwtPayload | undefined;
   if (!user) return false;
+
+  // Verify the device actually exists in the database
+  const d = getDb();
+  const device = d.select({ id: clients.id }).from(clients).where(eq(clients.id, clientId)).get();
+  if (!device) return false;
+
   if (user.role === 'admin') return true;
-  return hasPermission(user, 'device:view' as Permission);
+  return hasPermission(user, 'files:download' as Permission) && hasPermission(user, 'device:view' as Permission);
 }
 
 function serveFileFromDb(reply: FastifyReply, clientId: string, fileId: number, fileType: string) {
