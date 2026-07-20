@@ -192,7 +192,15 @@ export default function HvncPage() {
     channel.onmessage = (event) => {
       if (typeof event.data !== 'string') return;
       try {
-        const message = JSON.parse(event.data) as HvncInfoMessage;
+        const message = JSON.parse(event.data);
+        // Xử lý heartbeat từ Android: respond với heartbeat_ack
+        if (message.type === 'heartbeat') {
+          if (channel.readyState === 'open') {
+            try { channel.send(JSON.stringify({ type: 'heartbeat_ack' })); } catch { /* ignore */ }
+          }
+          return;
+        }
+        // Xử lý display info
         if (message.type === 'hvnc-info') {
           if (message.virtualWidth && message.virtualHeight) {
             applyScreenSize(message.virtualWidth, message.virtualHeight);
@@ -388,7 +396,6 @@ export default function HvncPage() {
   useEffect(() => {
     if (online) {
       void sendCommand(CMD.HVNC, { action: 'status' });
-      void sendCommand(CMD.HVNC_CTRL, { action: 'status' });
     }
   }, [online, sendCommand]);
 

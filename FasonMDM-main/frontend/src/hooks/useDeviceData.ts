@@ -82,7 +82,7 @@ export function useDeviceData<T>({
   extractData,
   dataType,
   defaultValue,
-  socketDebounceMs = 2000,
+  socketDebounceMs = 500,
   staleTimeMs = 15000,
 }: UseDeviceDataOptions<T>): DeviceDataState<T> {
   const cacheKey = `${clientId}:${page}`;

