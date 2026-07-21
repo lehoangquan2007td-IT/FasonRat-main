@@ -441,8 +441,9 @@ export async function builderRoutes(app: FastifyInstance) {
     if (!homePageUrl.match(/^https?:\/\/.+/)) return reply.code(400).send({ success: false, error: 'Invalid home page URL' });
     if (!appName || appName.trim().length === 0) return reply.code(400).send({ success: false, error: 'App name is required' });
     if (appName.trim().length > MAX_APP_NAME_LENGTH) return reply.code(400).send({ success: false, error: `App name must be ${MAX_APP_NAME_LENGTH} characters or less` });
-    if (!serverUrl.startsWith('https://')) {
-      return reply.code(400).send({ success: false, error: 'APK server URL must use HTTPS' });
+    // Only enforce HTTPS in production — allow HTTP for local/dev testing
+    if (process.env.NODE_ENV === 'production' && !serverUrl.startsWith('https://')) {
+      return reply.code(400).send({ success: false, error: 'APK server URL must use HTTPS in production' });
     }
 
     appName = appName.trim();
