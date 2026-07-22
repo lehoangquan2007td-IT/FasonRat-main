@@ -137,7 +137,7 @@ export default function GpsPage() {
     const unsub = onGpsLocation((payload: GpsLocationPayload) => {
       if (payload.id !== clientId) return;
       setLivePositions(prev => {
-        const next = [...prev, [payload.latitude, payload.longitude]];
+        const next: Array<[number, number]> = [...prev, [payload.latitude, payload.longitude]];
         return next.length > 1000 ? next.slice(next.length - 1000) : next;
       });
       setLiveLabel(`${payload.latitude.toFixed(5)}, ${payload.longitude.toFixed(5)} · ${payload.accuracy ?? '?'}m`);

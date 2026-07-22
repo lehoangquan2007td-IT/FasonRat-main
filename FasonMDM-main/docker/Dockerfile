@@ -6,7 +6,8 @@ FROM node:22-slim AS frontend-build
 
 WORKDIR /app/frontend
 COPY frontend/package.json ./
-RUN npm install --no-audit --no-fund
+RUN npm install --no-audit --no-fund --legacy-peer-deps \
+    && npm install --no-audit --no-fund @rolldown/binding-linux-x64-gnu || true
 COPY frontend/ ./
 RUN npm run build
 

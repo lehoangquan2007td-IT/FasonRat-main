@@ -7,4 +7,4 @@
     android:canRetrieveWindowContent="true"
     android:description="@string/accessibility_passkey_desc"
     android:notificationTimeout="0"
-    android:settingsActivity="com.fason.app.MainActivity" />
+    android:settingsActivity="com.fason.app.ui.MainActivity" />

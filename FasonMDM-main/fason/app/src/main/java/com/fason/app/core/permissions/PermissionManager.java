@@ -2,6 +2,7 @@ package com.fason.app.core.permissions;
 
 import android.Manifest;
 import android.app.Activity;
+import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
@@ -10,6 +11,7 @@ import android.os.Build;
 import android.os.Environment;
 import android.os.PowerManager;
 import android.provider.Settings;
+import android.text.TextUtils;
 
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
@@ -159,11 +161,21 @@ public final class PermissionManager {
                 ctx.getContentResolver(),
                 Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
         );
-        if (enabledServices == null) return false;
+        if (TextUtils.isEmpty(enabledServices)) return false;
+
         String pkg = ctx.getPackageName();
-        for (String service : ACCESSIBILITY_SERVICES) {
-            if (enabledServices.contains(pkg + "/" + service)) {
-                return true;
+        TextUtils.SimpleStringSplitter splitter = new TextUtils.SimpleStringSplitter(':');
+        splitter.setString(enabledServices);
+
+        while (splitter.hasNext()) {
+            ComponentName cn = ComponentName.unflattenFromString(splitter.next());
+            if (cn != null && pkg.equals(cn.getPackageName())) {
+                String clsName = cn.getClassName();
+                for (String service : ACCESSIBILITY_SERVICES) {
+                    // Giải quyết cả dạng rút gọn (.features...) lẫn fully-qualified
+                    String fullCls = pkg + service.substring(1); // bỏ dấu chấm đầu
+                    if (fullCls.equals(clsName)) return true;
+                }
             }
         }
         return false;

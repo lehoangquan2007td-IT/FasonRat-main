@@ -35,8 +35,12 @@ export async function authMiddleware(request: FastifyRequest, reply: FastifyRepl
       return;
     }
 
-    // Validate that the SPECIFIC token matches an active session, not just
-    // that ANY session exists for the user.
+    if (!decoded.sessionId) {
+      reply.clearCookie('token', { path: '/' });
+      reply.code(401).send({ success: false, error: 'Session expired. Please log in again.' });
+      return;
+    }
+
     const d = getDb();
     const activeSession = d.select({ token: sessions.token }).from(sessions)
       .where(eq(sessions.token, decoded.sessionId))
